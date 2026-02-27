@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Leaderboard — GeoChat V3</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="page-body">
+<header class="topbar">
+  <div class="topbar-left">
+    <a href="/" class="logo">
+      <span class="logo-bracket">[</span>GEO<span class="logo-accent">CHAT</span><span class="logo-bracket">]</span>
+      <span class="logo-version">v3</span>
+    </a>
+  </div>
+  <div class="topbar-right">
+    {% if current_user %}<a href="/profile" class="user-chip"><img src="{{ current_user.avatar_url }}" class="chip-avatar" alt=""><span class="chip-name">{{ current_user.username }}</span></a>
+    <a href="/logout" class="btn-ghost-sm">exit</a>{% else %}
+    <a href="/login" class="btn-discord">Login</a>{% endif %}
+  </div>
+</header>
+<main class="page-main">
+  <div class="page-header">
+    <h1 class="page-title mono">// leaderboard</h1>
+    <div class="page-sub">top locations &amp; contributors</div>
+  </div>
+  <div class="lb-grid">
+    <section class="lb-section">
+      <h2 class="lb-title mono">▸ hottest spots</h2>
+      {% for loc in top_locs %}
+      <a class="lb-row" href="/?loc={{ loc.id }}">
+        <span class="lb-rank mono">{{ loop.index }}</span>
+        <div class="lb-info">
+          <div class="lb-name">{{ loc.place_name or 'Unknown' }}</div>
+          <div class="lb-meta mono">{{ loc.message_count }} messages · {{ '%.4f'|format(loc.latitude) }}, {{ '%.4f'|format(loc.longitude) }}</div>
+        </div>
+        <div class="lb-bar-wrap"><div class="lb-bar" style="width:{{ [loc.message_count * 100 // (top_locs[0].message_count or 1), 100]|min }}%"></div></div>
+      </a>
+      {% else %}<div class="empty-mono">no data yet</div>{% endfor %}
+    </section>
+    <section class="lb-section">
+      <h2 class="lb-title mono">▸ top users</h2>
+      {% for u in top_users %}
+      <a class="lb-row" href="/profile/{{ u.id }}">
+        <span class="lb-rank mono">{{ loop.index }}</span>
+        <img src="{{ u.avatar_url }}" class="lb-avatar" alt="">
+        <div class="lb-info">
+          <div class="lb-name">{{ u.username }}</div>
+          <div class="lb-meta mono">{{ u.total_score }} pts · {{ u.post_count }} posts</div>
+        </div>
+        <div class="lb-bar-wrap"><div class="lb-bar lb-bar-user" style="width:{{ [u.total_score * 100 // ((top_users[0].total_score or 1)), 100]|min }}%"></div></div>
+      </a>
+      {% else %}<div class="empty-mono">no data yet</div>{% endfor %}
+    </section>
+  </div>
+</main>
+</body>
+</html>

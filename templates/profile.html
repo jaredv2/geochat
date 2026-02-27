@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ profile_user.username }} — GeoChat V3</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="page-body">
+<header class="topbar">
+  <div class="topbar-left">
+    <a href="/" class="logo">
+      <span class="logo-bracket">[</span>GEO<span class="logo-accent">CHAT</span><span class="logo-bracket">]</span>
+      <span class="logo-version">v3</span>
+    </a>
+  </div>
+  <div class="topbar-right">
+    {% if current_user %}<a href="/profile" class="user-chip"><img src="{{ current_user.avatar_url }}" class="chip-avatar" alt=""></a>
+    <a href="/logout" class="btn-ghost-sm">exit</a>{% else %}
+    <a href="/login" class="btn-discord">Login</a>{% endif %}
+  </div>
+</header>
+<main class="page-main">
+  <div class="profile-card">
+    <div class="profile-hero">
+      <img src="{{ profile_user.avatar_url }}" class="profile-avatar" alt="">
+      <div>
+        <h1 class="profile-name">{{ profile_user.username }}</h1>
+        <div class="profile-meta mono">{{ profile_user.post_count }} posts · since {{ profile_user.created_at[:10] }}</div>
+      </div>
+    </div>
+    {% if badges %}
+    <div class="badges-row">
+      {% for b in badges %}
+      {% set info = badge_defs.get(b.badge, {}) %}
+      <div class="badge-chip" title="{{ info.get('desc','') }}">
+        <span class="badge-icon">{{ info.get('icon','🏆') }}</span>
+        <span class="badge-label">{{ info.get('label', b.badge) }}</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  <div class="page-section">
+    <h2 class="lb-title mono">▸ recent messages</h2>
+    <div id="userMsgs"><div class="loading-mono">loading…</div></div>
+  </div>
+</main>
+<script>
+const UID = {{ profile_user.id }};
+async function load() {
+  const r = await fetch(`/api/messages/user/${UID}`);
+  const msgs = await r.json();
+  const el = document.getElementById('userMsgs');
+  if (!msgs.length) { el.innerHTML = '<div class="empty-mono">no messages yet</div>'; return; }
+  el.innerHTML = msgs.map(m => `
+    <a class="lb-row" href="/?loc=${m.location_id}">
+      <div class="lb-info">
+        <div class="lb-name">${esc(m.content)}</div>
+        <div class="lb-meta mono">◈ ${esc(m.place_name||'?')} · ▲${m.score} · ${rel(m.created_at)}${m.edited?' · edited':''}</div>
+      </div>
+    </a>`).join('');
+}
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function rel(ts){const d=new Date(ts.endsWith('Z')?ts:ts+'Z'),diff=(Date.now()-d)/1000;if(diff<60)return'just now';if(diff<3600)return Math.floor(diff/60)+'m ago';if(diff<86400)return Math.floor(diff/3600)+'h ago';return d.toLocaleDateString('en',{month:'short',day:'numeric'});}
+load();
+</script>
+</body>
+</html>

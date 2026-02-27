@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+psycopg2-binary
+python-dotenv
+httpx
+python-jose
+itsdangerous

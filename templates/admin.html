@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin — GeoChat V3</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="page-body">
+<header class="topbar">
+  <div class="topbar-left">
+    <a href="/" class="logo"><span class="logo-bracket">[</span>GEO<span class="logo-accent">CHAT</span><span class="logo-bracket">]</span><span class="logo-version">v3</span></a>
+  </div>
+  <div class="topbar-right">
+    <span class="admin-badge">ADMIN</span>
+    <a href="/" class="btn-ghost-sm">map</a>
+    <a href="/logout" class="btn-ghost-sm">exit</a>
+  </div>
+</header>
+<main class="page-main">
+  <div class="page-header">
+    <h1 class="page-title mono">// admin panel</h1>
+    <div class="page-sub">pending reports: {{ reports|length }}</div>
+  </div>
+  {% if not reports %}
+  <div class="empty-mono" style="padding:40px 0">no pending reports</div>
+  {% endif %}
+  {% for r in reports %}
+  <div class="report-card" id="report-{{ r.id }}">
+    <div class="report-head">
+      <span class="mono report-id">#{{ r.id }}</span>
+      <span class="report-place">◈ {{ r.place_name or '?' }}</span>
+      <span class="mono muted" style="margin-left:auto">{{ r.created_at[:16] }}</span>
+    </div>
+    <div class="report-body">
+      <div class="report-reporter">
+        <img src="{{ r.reporter_avatar }}" class="chip-avatar" alt="">
+        <span class="mono">{{ r.reporter }}</span>
+        <span class="muted"> reported message by </span>
+        <span class="mono">{{ r.author }}</span>
+      </div>
+      <div class="report-reason"><strong>Reason:</strong> {{ r.reason }}</div>
+      <div class="report-msg">{{ r.content }}</div>
+    </div>
+    <div class="report-actions">
+      <button class="btn-ghost-sm" onclick="resolve({{ r.id }}, 'dismiss')">dismiss</button>
+      <button class="btn-danger" onclick="resolve({{ r.id }}, 'hide')">hide message</button>
+    </div>
+  </div>
+  {% endfor %}
+</main>
+<script>
+async function resolve(rid, action) {
+  const res = await fetch(`/api/admin/report/${rid}`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({action})
+  });
+  if (res.ok) {
+    const card = document.getElementById('report-'+rid);
+    card.style.opacity = '0.3';
+    card.style.pointerEvents = 'none';
+    card.querySelector('.report-actions').innerHTML = `<span class="mono muted">${action}d</span>`;
+  }
+}
+</script>
+</body>
+</html>
