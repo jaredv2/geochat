@@ -22,7 +22,7 @@ from flask import (Flask, render_template, request, redirect,
                    session, jsonify, g, Response, stream_with_context, abort)
 import requests as http
 import psycopg
-import psycopg.rows import dict_row
+from psycopg.rows import dict_row
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 # ... rest of imports
