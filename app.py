@@ -170,7 +170,7 @@ def get_db():
               db_url
             )
             # Use DictCursor to access columns by name (like sqlite3.Row)
-			conn.row_factory = psycopg.rows.dict_row
+            conn.row_factory = psycopg.rows.dict_row
           	g.db = conn
         else:
             # SQLite Fallback (Local Dev)
