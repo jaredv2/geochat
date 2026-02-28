@@ -21,7 +21,10 @@ import os, sqlite3, secrets, html, json, queue, threading, unicodedata, re
 from flask import (Flask, render_template, request, redirect,
                    session, jsonify, g, Response, stream_with_context, abort)
 import requests as http
-
+import psycopg2
+import psycopg2.extras
+from urllib.parse import urlparse
+# ... rest of imports
 app = Flask(__name__)
 
 # ── Secret key ────────────────────────────────────────────────────────────────
@@ -156,17 +159,71 @@ _cleanup_thread.start()
 # ── DB ────────────────────────────────────────────────────────────────────────
 def get_db():
     if 'db' not in g:
-        g.db = sqlite3.connect(DATABASE)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
-        g.db.execute("PRAGMA journal_mode = WAL")
+        db_url = os.environ.get('DATABASE_URL')
+        
+        if db_url:
+            # PostgreSQL Connection
+            result = urlparse(db_url)
+            username = result.username
+            password = result.password
+            database = result.path[1:]
+            hostname = result.hostname
+            port = result.port
+            
+            conn = psycopg2.connect(
+                database=database,
+                user=username,
+                password=password,
+                host=hostname,
+                port=port
+            )
+            # Use DictCursor to access columns by name (like sqlite3.Row)
+            g.db_type = 'postgres'
+            g.db = conn
+        else:
+            # SQLite Fallback (Local Dev)
+            g.db_type = 'sqlite'
+            g.db = sqlite3.connect(DATABASE)
+            g.db.row_factory = sqlite3.Row
+            g.db.execute("PRAGMA foreign_keys = ON")
+    
     return g.db
 
 @app.teardown_appcontext
 def close_db(e=None):
     db = g.pop('db', None)
-    if db: db.close()
+    if db is not None:
+        db.close()
 
+def query_db(query, args=(), one=False):
+    db = get_db()
+    
+    # 1. Convert ? to %s for Postgres
+    if getattr(g, 'db_type', 'sqlite') == 'postgres':
+        query = query.replace('?', '%s')
+        cursor = db.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    else:
+        cursor = db.cursor()
+
+    # 2. Execute
+    cursor.execute(query, args)
+    
+    # 3. Commit if it's a modification (INSERT/UPDATE/DELETE)
+    if query.strip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
+        db.commit()
+        # Return last row id for inserts if needed
+        if 'INSERT' in query.upper() and getattr(g, 'db_type', 'sqlite') == 'postgres':
+             try:
+                 # Postgres doesn't support cursor.lastrowid directly for all drivers
+                 # Ideally, use "RETURNING id" in your SQL queries for Postgres
+                 pass 
+             except: pass
+        return cursor
+
+    # 4. Return results
+    rv = cursor.fetchall()
+    cursor.close()
+    return (rv[0] if rv else None) if one else rv
 def init_db():
     with app.app_context():
         db = get_db()
@@ -769,9 +826,20 @@ def post_message():
                              (parent_id,)).fetchone()
         if not parent or parent['location_id'] != lid:
             return jsonify({'error': 'Invalid parent'}), 400
-    cur = db.execute("INSERT INTO messages (location_id,user_id,content,parent_id) VALUES (?,?,?,?)",
-                     (lid, u['id'], content, parent_id))
-    mid = cur.lastrowid
+# Change this:
+# cur = db.execute("INSERT ...")
+# mid = cur.lastrowid
+
+# To this:
+    if getattr(g, 'db_type', 'sqlite') == 'postgres':
+        cur = db.cursor()
+        cur.execute("INSERT INTO messages (...) VALUES (...) RETURNING id", (args...))
+        mid = cur.fetchone()[0]
+        db.commit()
+    else:
+        cur = db.execute("INSERT INTO messages (...) VALUES (...)", (args...))
+        mid = cur.lastrowid
+        db.commit()
     db.execute("UPDATE locations SET message_count=message_count+1,last_user_id=?,last_user_avatar=? WHERE id=?",
                (u['id'], u['avatar_url'], lid))
     if not parent_id:
