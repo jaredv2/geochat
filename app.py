@@ -218,7 +218,7 @@ def init_db():
     with app.app_context():
         db = get_db()
         with open(os.path.join(os.path.dirname(__file__), 'schema.sql')) as f:
-            db.executescript(f.read())
+            db.execute(f.read())
         db.commit()
         # Migrate rate_limits if FK version
         try:
