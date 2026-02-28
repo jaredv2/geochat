@@ -165,19 +165,9 @@ def get_db():
         
         if db_url:
             # PostgreSQL Connection
-            result = urlparse(db_url)
-            username = result.username
-            password = result.password
-            database = result.path[1:]
-            hostname = result.hostname
-            port = result.port
             
             conn = psycopg2.connect(
-                database=database,
-                user=username,
-                password=password,
-                host=hostname,
-                port=port
+                database=db
             )
             # Use DictCursor to access columns by name (like sqlite3.Row)
             g.db_type = 'postgres'
