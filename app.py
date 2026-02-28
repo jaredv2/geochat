@@ -221,30 +221,39 @@ def init_db():
             db.execute(f.read())
         db.commit()
         # Migrate rate_limits if FK version
-        try:
-            db.execute("INSERT INTO rate_limits (user_id,action) VALUES (0,'_t')")
-            db.execute("DELETE FROM rate_limits WHERE user_id=0")
-            db.commit()
-        except Exception:
-            db.execute("DROP TABLE IF EXISTS rate_limits")
-            db.execute("""CREATE TABLE rate_limits(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL, action TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP)""")
-            db.commit()
-        # Migrate ban columns if missing
-        cols = [r[1] for r in db.execute("PRAGMA table_info(users)").fetchall()]
-        if 'is_banned' not in cols:
-            db.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0")
-            db.commit()
-        if 'ban_reason' not in cols:
-            db.execute("ALTER TABLE users ADD COLUMN ban_reason TEXT")
-            db.commit()
-        # Migrate top_content on locations
-        loc_cols = [r[1] for r in db.execute("PRAGMA table_info(locations)").fetchall()]
-        if 'top_content' not in loc_cols:
-            db.execute("ALTER TABLE locations ADD COLUMN top_content TEXT")
-            db.commit()
+        # ─── FIX: Only run PRAGMA checks if using SQLite ─────────────────────
+        if getattr(g, 'db_type', 'sqlite') == 'sqlite':
+            # Migrate rate_limits
+            try:
+                db.execute("INSERT INTO rate_limits (user_id,action) VALUES (0,'_t')")
+                db.execute("DELETE FROM rate_limits WHERE user_id=0")
+                db.commit()
+            except Exception:
+                db.execute("DROP TABLE IF EXISTS rate_limits")
+                db.execute("""CREATE TABLE rate_limits(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL, action TEXT NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+                db.commit()
+
+            # Migrate user columns using PRAGMA (SQLite Only)
+            cols = [r[1] for r in db.execute("PRAGMA table_info(users)").fetchall()]
+            if 'is_banned' not in cols:
+                db.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0")
+                db.commit()
+            if 'ban_reason' not in cols:
+                db.execute("ALTER TABLE users ADD COLUMN ban_reason TEXT")
+                db.commit()
+            
+            # Migrate location columns
+            loc_cols = [r[1] for r in db.execute("PRAGMA table_info(locations)").fetchall()]
+            if 'top_content' not in loc_cols:
+                db.execute("ALTER TABLE locations ADD COLUMN top_content TEXT")
+                db.commit()
+        else:
+            # If using Postgres, we assume the schema is already correct 
+            # or managed via external tools/SQL scripts.
+            pass
 
 # ── Ban check ─────────────────────────────────────────────────────────────────
 def check_banned():
