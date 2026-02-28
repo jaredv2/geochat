@@ -7,12 +7,6 @@ services:
     startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT --worker-class gthread --log-level info --access-logfile - --error-logfile -
     healthCheckPath: /health
 
-    # Persistent disk — keeps database.db across deploys
-    disk:
-      name: geochat-data
-      mountPath: /data
-      sizeGB: 1
-
     envVars:
       - key: DATABASE_PATH
         value: /data/database.db
