@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: geochat
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT --worker-class gthread --log-level info --access-logfile - --error-logfile -
+    healthCheckPath: /health
+
+    # Persistent disk — keeps database.db across deploys
+    disk:
+      name: geochat-data
+      mountPath: /data
+      sizeGB: 1
+
+    envVars:
+      - key: DATABASE_PATH
+        value: /data/database.db
+
+      - key: SECRET_KEY
+        generateValue: true          # Render auto-generates a secure random value
+
+      - key: PRODUCTION
+        value: "1"
+
+      - key: RENDER
+        value: "true"
+
+      # ── Fill these in the Render dashboard after deploy ──────────────────────
+      - key: DISCORD_CLIENT_ID
+        sync: false                  # set manually in dashboard
+
+      - key: DISCORD_CLIENT_SECRET
+        sync: false
+
+      - key: DISCORD_REDIRECT_URI
+        sync: false                  # e.g. https://geochat.onrender.com/callback
+
+      - key: ADMIN_DISCORD_ID
+        sync: false                  # your Discord user ID (optional)
+
+      - key: LIBRETRANSLATE_URL
+        sync: false                  # optional: your LibreTranslate instance URL
