@@ -21,8 +21,8 @@ import os, sqlite3, secrets, html, json, queue, threading, unicodedata, re
 from flask import (Flask, render_template, request, redirect,
                    session, jsonify, g, Response, stream_with_context, abort)
 import requests as http
-import psycopg2
-import psycopg2.extras
+import psycopg
+import psycopg.rows import dict_row
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 # ... rest of imports
@@ -166,12 +166,12 @@ def get_db():
         if db_url:
             # PostgreSQL Connection
             
-            conn = psycopg2.connect(
+            conn = psycopg.connect(
               db_url
             )
             # Use DictCursor to access columns by name (like sqlite3.Row)
-            g.db_type = 'postgres'
-            g.db = conn
+			      conn.row_factory = psycopg.rows.dict_row
+          g.db = conn
         else:
             # SQLite Fallback (Local Dev)
             g.db_type = 'sqlite'
