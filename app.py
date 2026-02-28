@@ -167,7 +167,7 @@ def get_db():
             # PostgreSQL Connection
             
             conn = psycopg2.connect(
-                database=db_url
+              db_url
             )
             # Use DictCursor to access columns by name (like sqlite3.Row)
             g.db_type = 'postgres'
