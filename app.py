@@ -391,7 +391,7 @@ def login():
     from urllib.parse import urlencode
     p = urlencode({'client_id': DISCORD_CLIENT_ID, 'redirect_uri': DISCORD_REDIRECT_URI,
                    'response_type': 'code', 'scope': 'identify', 'state': state})
-    return redirect(f"https://discord.com/oauth2/authorize%s{p}")
+    return redirect(f"https://discord.com/oauth2/authorize?{p}")
 
 @app.route('/callback')
 def callback():
