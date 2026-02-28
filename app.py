@@ -10,14 +10,13 @@ Required environment variables:
 Optional:
   ADMIN_DISCORD_ID       Your Discord user ID for admin panel access
   LIBRETRANSLATE_URL     LibreTranslate instance URL for message translation
-  DATABASE_PATH          SQLite file path (default: ./database.db)
   PORT                   HTTP port (default: 8000)
 
 Deploy:
   See README.md for Render + UptimeRobot free deployment guide.
 """
 
-import os, sqlite3, secrets, html, json, queue, threading, unicodedata, re
+import os, secrets, html, json, queue, threading, unicodedata, re
 from flask import (Flask, render_template, request, redirect,
                    session, jsonify, g, Response, stream_with_context, abort)
 import requests as http
@@ -63,8 +62,6 @@ DISCORD_REDIRECT_URI  = os.environ.get('DISCORD_REDIRECT_URI', f'http://localhos
 DISCORD_API           = 'https://discord.com/api/v10'
 ADMIN_DISCORD_ID      = os.environ.get('ADMIN_DISCORD_ID', '')
 LIBRETRANSLATE_URL    = os.environ.get('LIBRETRANSLATE_URL', '')
-DATABASE              = os.environ.get('DATABASE_PATH',
-                            os.path.join(os.path.dirname(__file__), 'database.db'))
 ONLINE_WINDOW_SECS    = 120  # user considered online if seen within 2 min
 
 BADGE_DEFS = {
@@ -133,7 +130,7 @@ def _cleanup_loop():
                 orphans = db.execute("""
                     SELECT id FROM locations
                     WHERE message_count = 0
-                    AND created_at < datetime('now', '-5 minutes')
+                    AND created_at < NOW() - INTERVAL '5 minutes'
                 """).fetchall()
                 for row in orphans:
                     lid = row['id']
@@ -149,7 +146,7 @@ def _cleanup_loop():
                     log.info("Cleanup: removed %d orphan location(s)", len(orphans))
                 # Also clean stale presence records
                 db.execute("""DELETE FROM online_presence
-                              WHERE last_seen < datetime('now', '-10 minutes')""")
+                              WHERE last_seen < NOW() - INTERVAL '10 minutes'""")
                 db.commit()
                 close_db()
         except Exception as e:
@@ -162,21 +159,9 @@ _cleanup_thread.start()
 def get_db():
     if 'db' not in g:
         db_url = os.environ.get('DATABASE_URL')
-        
-        if db_url:
-            # PostgreSQL Connection
-            
-            conn = psycopg.connect(db_url)
-            # Use DictCursor to access columns by name (like sqlite3.Row)
-            conn.row_factory = psycopg.rows.dict_row
-            g.db = conn
-        else:
-            # SQLite Fallback (Local Dev)
-            g.db_type = 'sqlite'
-            g.db = sqlite3.connect(DATABASE)
-            g.db.row_factory = sqlite3.Row
-            g.db.execute("PRAGMA foreign_keys = ON")
-    
+        conn = psycopg.connect(db_url)
+        conn.row_factory = psycopg.rows.dict_row
+        g.db = conn
     return g.db
 
 @app.teardown_appcontext
@@ -187,30 +172,11 @@ def close_db(e=None):
 
 def query_db(query, args=(), one=False):
     db = get_db()
-    
-    # 1. Convert %s to %s for Postgres
-    if getattr(g, 'db_type', 'sqlite') == 'postgres':
-        query = query.replace('%s', '%s')
-        cursor = db.cursor(cursor_factory=psycopg2.extras.DictCursor)
-    else:
-        cursor = db.cursor()
-
-    # 2. Execute
+    cursor = db.cursor()
     cursor.execute(query, args)
-    
-    # 3. Commit if it's a modification (INSERT/UPDATE/DELETE)
     if query.strip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
         db.commit()
-        # Return last row id for inserts if needed
-        if 'INSERT' in query.upper() and getattr(g, 'db_type', 'sqlite') == 'postgres':
-             try:
-                 # Postgres doesn't support cursor.lastrowid directly for all drivers
-                 # Ideally, use "RETURNING id" in your SQL queries for Postgres
-                 pass 
-             except: pass
         return cursor
-
-    # 4. Return results
     rv = cursor.fetchall()
     cursor.close()
     return (rv[0] if rv else None) if one else rv
@@ -221,39 +187,39 @@ def init_db():
             db.execute(f.read())
         db.commit()
         # Migrate rate_limits if FK version
-        # ─── FIX: Only run PRAGMA checks if using SQLite ─────────────────────
-        if getattr(g, 'db_type', 'sqlite') == 'sqlite':
-            # Migrate rate_limits
-            try:
-                db.execute("INSERT INTO rate_limits (user_id,action) VALUES (0,'_t')")
-                db.execute("DELETE FROM rate_limits WHERE user_id=0")
-                db.commit()
-            except Exception:
-                db.execute("DROP TABLE IF EXISTS rate_limits")
-                db.execute("""CREATE TABLE rate_limits(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL, action TEXT NOT NULL,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP)""")
-                db.commit()
-
-            # Migrate user columns using PRAGMA (SQLite Only)
-            cols = [r[1] for r in db.execute("PRAGMA table_info(users)").fetchall()]
-            if 'is_banned' not in cols:
-                db.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0")
-                db.commit()
-            if 'ban_reason' not in cols:
-                db.execute("ALTER TABLE users ADD COLUMN ban_reason TEXT")
-                db.commit()
-            
-            # Migrate location columns
-            loc_cols = [r[1] for r in db.execute("PRAGMA table_info(locations)").fetchall()]
-            if 'top_content' not in loc_cols:
-                db.execute("ALTER TABLE locations ADD COLUMN top_content TEXT")
-                db.commit()
-        else:
-            # If using Postgres, we assume the schema is already correct 
-            # or managed via external tools/SQL scripts.
-            pass
+        try:
+            db.execute("INSERT INTO rate_limits (user_id,action) VALUES (0,'_t')")
+            db.execute("DELETE FROM rate_limits WHERE user_id=0")
+            db.commit()
+        except Exception:
+            db.rollback()
+            db.execute("DROP TABLE IF EXISTS rate_limits")
+            db.execute("""CREATE TABLE rate_limits(
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL, action TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+            db.commit()
+        # Migrate ban columns if missing
+        cols_result = db.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name='users'
+        """).fetchall()
+        cols = [r['column_name'] for r in cols_result]
+        if 'is_banned' not in cols:
+            db.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0")
+            db.commit()
+        if 'ban_reason' not in cols:
+            db.execute("ALTER TABLE users ADD COLUMN ban_reason TEXT")
+            db.commit()
+        # Migrate top_content on locations
+        loc_cols_result = db.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name='locations'
+        """).fetchall()
+        loc_cols = [r['column_name'] for r in loc_cols_result]
+        if 'top_content' not in loc_cols:
+            db.execute("ALTER TABLE locations ADD COLUMN top_content TEXT")
+            db.commit()
 
 # ── Ban check ─────────────────────────────────────────────────────────────────
 def check_banned():
@@ -285,8 +251,8 @@ def current_user():
 def check_rate_limit(user_id, action):
     limit, window = RATE_LIMITS.get(action, (10, 60))
     db = get_db()
-    db.execute("DELETE FROM rate_limits WHERE action=%s AND created_at < datetime('now',%s || ' seconds')",
-               (action, f'-{window}'))
+    db.execute("DELETE FROM rate_limits WHERE action=%s AND created_at < NOW() - ((%s || ' seconds')::INTERVAL)",
+               (action, str(window)))
     count = db.execute("SELECT COUNT(*) FROM rate_limits WHERE user_id=%s AND action=%s",
                        (user_id, action)).fetchone()[0]
     if count >= limit: return False
@@ -318,8 +284,8 @@ def fmt_msg(row, uid=None, replies=None):
 
 def get_online_count(lid):
     return get_db().execute(
-        "SELECT COUNT(DISTINCT user_id) FROM online_presence WHERE location_id=%s AND last_seen > datetime('now',%s || ' seconds')",
-        (lid, f'-{ONLINE_WINDOW_SECS}')).fetchone()[0]
+        "SELECT COUNT(DISTINCT user_id) FROM online_presence WHERE location_id=%s AND last_seen > NOW() - ((%s || ' seconds')::INTERVAL)",
+        (lid, str(ONLINE_WINDOW_SECS))).fetchone()[0]
 
 def touch_presence(uid, lid):
     if not uid: return
@@ -380,7 +346,7 @@ def award_badges(user_id):
 
     def give(badge):
         if badge not in earned:
-            db.execute("INSERT OR IGNORE INTO badges (user_id,badge) VALUES (%s,%s)", (user_id, badge))
+            db.execute("INSERT INTO badges (user_id,badge) VALUES (%s,%s) ON CONFLICT DO NOTHING", (user_id, badge))
             new_badges.append(badge)
 
     pc = u['post_count']
@@ -419,7 +385,7 @@ def award_badges(user_id):
 def login():
     state = secrets.token_urlsafe(24)
     db = get_db()
-    db.execute("DELETE FROM oauth_states WHERE created_at < datetime('now','-10 minutes')")
+    db.execute("DELETE FROM oauth_states WHERE created_at < NOW() - INTERVAL '10 minutes'")
     db.execute("INSERT INTO oauth_states (state) VALUES (%s)", (state,))
     db.commit()
     from urllib.parse import urlencode
@@ -509,7 +475,7 @@ def leaderboard():
         'total_messages': db.execute("SELECT COUNT(*) FROM messages WHERE hidden=0").fetchone()[0],
         'total_locations':db.execute("SELECT COUNT(*) FROM locations WHERE message_count>0").fetchone()[0],
         'online_users':   db.execute(
-            f"SELECT COUNT(DISTINCT user_id) FROM online_presence WHERE last_seen > datetime('now','-{ONLINE_WINDOW_SECS} seconds')"
+            f"SELECT COUNT(DISTINCT user_id) FROM online_presence WHERE last_seen > NOW() - INTERVAL '{ONLINE_WINDOW_SECS} seconds'"
         ).fetchone()[0],
     }
     return render_template('leaderboard.html',
@@ -572,7 +538,7 @@ def global_stats():
         'total_messages': db.execute("SELECT COUNT(*) FROM messages WHERE hidden=0").fetchone()[0],
         'total_locations':db.execute("SELECT COUNT(*) FROM locations WHERE message_count>0").fetchone()[0],
         'online_users':   db.execute(
-            f"SELECT COUNT(DISTINCT user_id) FROM online_presence WHERE last_seen > datetime('now','-{ONLINE_WINDOW_SECS} seconds')"
+            f"SELECT COUNT(DISTINCT user_id) FROM online_presence WHERE last_seen > NOW() - INTERVAL '{ONLINE_WINDOW_SECS} seconds'"
         ).fetchone()[0],
     })
 
@@ -638,10 +604,11 @@ def create_location():
         if row:
             uid_safe    = row['id']
             avatar_safe = row['avatar_url']
-    cur = db.execute("INSERT INTO locations (latitude,longitude,place_name,last_user_id) VALUES (%s,%s,%s,%s)",
+    cur = db.execute("INSERT INTO locations (latitude,longitude,place_name,last_user_id) VALUES (%s,%s,%s,%s) RETURNING id",
                      (lat, lng, place, uid_safe))
     db.commit()
-    return jsonify({'id': cur.lastrowid, 'place_name': place, 'message_count': 0,
+    new_id = cur.fetchone()['id']
+    return jsonify({'id': new_id, 'place_name': place, 'message_count': 0,
                     'last_user_avatar': avatar_safe, 'top_content': None}), 201
 
 @app.route('/api/location/<int:lid>')
@@ -825,26 +792,13 @@ def post_message():
                              (parent_id,)).fetchone()
         if not parent or parent['location_id'] != lid:
             return jsonify({'error': 'Invalid parent'}), 400
-# PostgreSQL version
-    if getattr(g, 'db_type', 'sqlite') == 'postgres':
-        cur = db.cursor()
-        # Replace the '...' below with your actual column names and values
-        cur.execute(
-        "INSERT INTO messages (room_id, user_id, username, avatar, content, timestamp) "
-        "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id", 
-        (room_id, user_id, username, avatar, content, timestamp)
-        )
-        mid = cur.fetchone()[0]
-        db.commit()
-    else:
-      # SQLite version (original)
-      cur = db.execute(
-        "INSERT INTO messages (room_id, user_id, username, avatar, content, timestamp) "
-        "VALUES (?, ?, ?, ?, ?, ?)", 
-        (room_id, user_id, username, avatar, content, timestamp)
-      )
-      mid = cur.lastrowid
-      db.commit()
+# Insert message and get the new id
+    cur = db.execute(
+        "INSERT INTO messages (location_id,user_id,content,parent_id) VALUES (%s,%s,%s,%s) RETURNING id",
+        (lid, u['id'], content, parent_id)
+    )
+    mid = cur.fetchone()['id']
+    db.commit()
     db.execute("UPDATE locations SET message_count=message_count+1,last_user_id=%s,last_user_avatar=%s WHERE id=%s",
                (u['id'], u['avatar_url'], lid))
     if not parent_id:
@@ -1028,7 +982,7 @@ def resolve_report(rid):
     r      = db.execute("SELECT message_id FROM reports WHERE id=%s", (rid,)).fetchone()
     if not r: return jsonify({'error': 'Not found'}), 404
     if action == 'hide':
-        db.execute("UPDATE messages SET hidden=1 WHERE id=%s", (r['message_id'],))
+        db.execute("UPDATE messages SET hidden=TRUE WHERE id=%s", (r['message_id'],))
     db.execute("UPDATE reports SET status='resolved',resolved_by=%s WHERE id=%s", (u['id'], rid))
     db.commit()
     return jsonify({'ok': True})
@@ -1055,7 +1009,7 @@ def get_notifications():
 def mark_read():
     u = current_user()
     if not u: return jsonify({'error': 'Unauthorized'}), 401
-    get_db().execute("UPDATE notifications SET read=1 WHERE user_id=%s", (u['id'],))
+    get_db().execute("UPDATE notifications SET read=TRUE WHERE user_id=%s", (u['id'],))
     get_db().commit()
     return jsonify({'ok': True})
 
