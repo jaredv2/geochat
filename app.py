@@ -24,8 +24,10 @@ import requests as http
 import psycopg2
 import psycopg2.extras
 from urllib.parse import urlparse
+from dotenv import load_dotenv
 # ... rest of imports
 app = Flask(__name__)
+load_dotenv()
 
 # ── Secret key ────────────────────────────────────────────────────────────────
 _env_key = os.environ.get('SECRET_KEY', '')
