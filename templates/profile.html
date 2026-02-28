@@ -3,67 +3,83 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{{ profile_user.username }} — GeoChat V3</title>
-<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+<title>{{ profile_user.username }} — GeoChat</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/style.css">
 </head>
-<body class="page-body">
+<body class="page">
 <header class="topbar">
   <div class="topbar-left">
-    <a href="/" class="logo">
-      <span class="logo-bracket">[</span>GEO<span class="logo-accent">CHAT</span><span class="logo-bracket">]</span>
-      <span class="logo-version">v3</span>
-    </a>
+    <a href="/" class="logo">GEOCHAT</a>
   </div>
   <div class="topbar-right">
-    {% if current_user %}<a href="/profile" class="user-chip"><img src="{{ current_user.avatar_url }}" class="chip-avatar" alt=""></a>
-    <a href="/logout" class="btn-ghost-sm">exit</a>{% else %}
-    <a href="/login" class="btn-discord">Login</a>{% endif %}
+    {% if current_user %}
+    <a href="/profile" class="user-chip"><img src="{{ current_user.avatar_url }}" class="chip-av" alt=""></a>
+    <a href="/logout" class="tb-link">exit</a>
+    {% else %}
+    <a href="/login" class="btn-login">Login</a>
+    {% endif %}
   </div>
 </header>
-<main class="page-main">
-  <div class="profile-card">
+<main class="page-wrap">
+  <h1 class="page-title">PROFILE</h1>
+
+  <div class="page-section" style="margin-bottom:20px">
     <div class="profile-hero">
-      <img src="{{ profile_user.avatar_url }}" class="profile-avatar" alt="">
+      <img src="{{ profile_user.avatar_url }}" class="profile-av" alt="">
       <div>
-        <h1 class="profile-name">{{ profile_user.username }}</h1>
-        <div class="profile-meta mono">{{ profile_user.post_count }} posts · since {{ profile_user.created_at[:10] }}</div>
+        <div class="profile-name">{{ profile_user.username }}</div>
+        <div class="profile-sub">{{ profile_user.post_count }} posts · joined {{ profile_user.created_at[:10] }}</div>
       </div>
     </div>
+
     {% if badges %}
-    <div class="badges-row">
-      {% for b in badges %}
-      {% set info = badge_defs.get(b.badge, {}) %}
-      <div class="badge-chip" title="{{ info.get('desc','') }}">
-        <span class="badge-icon">{{ info.get('icon','🏆') }}</span>
-        <span class="badge-label">{{ info.get('label', b.badge) }}</span>
+    <div style="border-top:1px solid var(--border); padding:2px 0">
+      <div class="section-head" style="border-bottom:none">BADGES</div>
+      <div class="badges-wrap">
+        {% for b in badges %}
+        {% set info = badge_defs.get(b.badge, {}) %}
+        <div class="badge-pill" title="{{ info.get('desc','') }}">
+          <span class="badge-pill-icon">{{ info.get('icon','🏅') }}</span>
+          <span class="badge-pill-label">{{ info.get('label', b.badge) }}</span>
+        </div>
+        {% endfor %}
       </div>
-      {% endfor %}
     </div>
     {% endif %}
   </div>
+
   <div class="page-section">
-    <h2 class="lb-title mono">▸ recent messages</h2>
-    <div id="userMsgs"><div class="loading-mono">loading…</div></div>
+    <div class="section-head">RECENT MESSAGES</div>
+    <div id="msgs"><div class="loading-state">Loading…</div></div>
   </div>
 </main>
 <script>
 const UID = {{ profile_user.id }};
 async function load() {
-  const r = await fetch(`/api/messages/user/${UID}`);
-  const msgs = await r.json();
-  const el = document.getElementById('userMsgs');
-  if (!msgs.length) { el.innerHTML = '<div class="empty-mono">no messages yet</div>'; return; }
+  const res = await fetch(`/api/messages/user/${UID}`);
+  const msgs = await res.json();
+  const el = document.getElementById('msgs');
+  if (!msgs.length) { el.innerHTML = '<div class="empty-state">No messages yet.</div>'; return; }
   el.innerHTML = msgs.map(m => `
-    <a class="lb-row" href="/?loc=${m.location_id}">
-      <div class="lb-info">
-        <div class="lb-name">${esc(m.content)}</div>
-        <div class="lb-meta mono">◈ ${esc(m.place_name||'?')} · ▲${m.score} · ${rel(m.created_at)}${m.edited?' · edited':''}</div>
+    <a class="user-msg-row" href="/?loc=${m.location_id}">
+      <div class="user-msg-place">▸ ${e(m.place_name||'Unknown location')}</div>
+      <div class="user-msg-text">${e(m.content)}</div>
+      <div class="user-msg-meta">
+        <span class="score-up">▲ ${m.score}</span>
+        <span>${rel(m.created_at)}</span>
+        ${m.edited ? '<span>edited</span>' : ''}
       </div>
     </a>`).join('');
 }
-function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-function rel(ts){const d=new Date(ts.endsWith('Z')?ts:ts+'Z'),diff=(Date.now()-d)/1000;if(diff<60)return'just now';if(diff<3600)return Math.floor(diff/60)+'m ago';if(diff<86400)return Math.floor(diff/3600)+'h ago';return d.toLocaleDateString('en',{month:'short',day:'numeric'});}
+function e(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function rel(ts){
+  const d=new Date(ts.endsWith('Z')?ts:ts+'Z'), diff=(Date.now()-d)/1000;
+  if(diff<60) return 'just now';
+  if(diff<3600) return Math.floor(diff/60)+'m ago';
+  if(diff<86400) return Math.floor(diff/3600)+'h ago';
+  return d.toLocaleDateString('en',{month:'short',day:'numeric'});
+}
 load();
 </script>
 </body>

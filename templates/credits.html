@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>About — GeoChat</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="page">
+<header class="topbar">
+  <div class="topbar-left">
+    <a href="/" class="logo">GEOCHAT</a>
+  </div>
+  <div class="topbar-right">
+    <a href="/" class="tb-link">← back to map</a>
+  </div>
+</header>
+
+<main class="page-wrap" style="max-width:620px">
+  <h1 class="page-title">CREDITS</h1>
+
+  <div class="page-section" style="margin-bottom:20px">
+    <div class="section-head">ABOUT</div>
+    <div style="padding:20px 18px;line-height:1.8;font-size:0.92rem">
+      <p style="margin-bottom:14px">
+        <strong>GeoChat</strong> is a place to have real conversations about real places — every point on Earth is its own discussion thread. No feeds, no timelines. Just people talking about where they are, where they've been, or anywhere that matters to them.
+      </p>
+      <p style="color:var(--muted);font-size:0.82rem;font-family:'IBM Plex Mono',monospace">
+        Discuss anything. Explore everywhere. Leave your mark.
+      </p>
+    </div>
+  </div>
+
+  <div class="page-section" style="margin-bottom:20px">
+    <div class="section-head">CREATOR</div>
+    <div style="padding:18px;display:flex;align-items:center;gap:16px">
+      <div style="width:52px;height:52px;background:var(--ink);display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-size:1.4rem;color:var(--parchment);flex-shrink:0;border:2px solid var(--border)">🧭</div>
+      <div>
+        <div style="font-weight:600;font-size:1rem;margin-bottom:4px">Built by the GeoChat team</div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:0.72rem;color:var(--muted)">Designed, developed, and maintained with care</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="page-section" style="margin-bottom:20px">
+    <div class="section-head">OPEN SOURCE & TOOLS</div>
+    <div style="padding:0">
+      {% for item in [
+        ('Leaflet.js', 'Interactive maps', 'https://leafletjs.com'),
+        ('Leaflet.markercluster', 'Marker clustering', 'https://github.com/Leaflet/Leaflet.markercluster'),
+        ('Leaflet.heat', 'Heatmap layer', 'https://github.com/Leaflet/Leaflet.heat'),
+        ('OpenStreetMap', 'Map tiles & geodata', 'https://www.openstreetmap.org'),
+        ('Nominatim', 'Geocoding & reverse geocoding', 'https://nominatim.org'),
+        ('Discord OAuth2', 'Authentication', 'https://discord.com/developers'),
+        ('Flask', 'Python web framework', 'https://flask.palletsprojects.com'),
+        ('SQLite', 'Database', 'https://sqlite.org'),
+        ('IBM Plex Mono & Sans', 'Typography', 'https://fonts.google.com/specimen/IBM+Plex+Mono'),
+        ('LibreTranslate', 'Translation API (optional)', 'https://libretranslate.com'),
+      ] %}
+      <a href="{{ item[2] }}" target="_blank" rel="noopener" class="credit-row">
+        <span class="credit-name">{{ item[0] }}</span>
+        <span class="credit-desc">{{ item[1] }}</span>
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+      </a>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="page-section" style="margin-bottom:20px">
+    <div class="section-head">PLATFORM</div>
+    <div style="padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:0.78rem;color:var(--muted);line-height:2">
+      GeoChat<br>
+      Real-time · Location-based · Community-moderated<br>
+      Login with Discord · Map powered by OpenStreetMap<br>
+      Free to use · No ads · No tracking
+    </div>
+  </div>
+
+</main>
+
+<style>
+.credit-row {
+  display:flex;align-items:center;gap:12px;padding:11px 18px;
+  border-bottom:1px solid var(--border);text-decoration:none;color:var(--ink);
+  transition:background 0.1s;
+}
+.credit-row:last-child{border-bottom:none}
+.credit-row:hover{background:var(--cream)}
+.credit-name{font-family:'IBM Plex Mono',monospace;font-size:0.8rem;font-weight:600;min-width:180px}
+.credit-desc{flex:1;font-size:0.82rem;color:var(--muted)}
+.credit-row svg{flex-shrink:0;color:var(--muted)}
+</style>
+</body>
+</html>

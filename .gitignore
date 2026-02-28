@@ -1,4 +1,39 @@
-venv
+# Database (never commit — use Render's persistent disk)
 *.db
-__pycache__
+*.db-shm
+*.db-wal
+
+# Secret key file (dev fallback — always use SECRET_KEY env var in prod)
+.secret_key
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Environment files (use Render env vars instead)
 .env
+.env.*
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

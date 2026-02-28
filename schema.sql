@@ -103,6 +103,15 @@ CREATE TABLE IF NOT EXISTS oauth_states (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS online_presence (
+    user_id INTEGER NOT NULL,
+    location_id INTEGER NOT NULL,
+    last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, location_id),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (location_id) REFERENCES locations(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_location ON messages(location_id);
 CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id);
 CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);
@@ -111,3 +120,4 @@ CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read);
 CREATE INDEX IF NOT EXISTS idx_locations_coords ON locations(latitude, longitude);
 CREATE INDEX IF NOT EXISTS idx_badges_user ON badges(user_id);
+CREATE INDEX IF NOT EXISTS idx_presence ON online_presence(location_id, last_seen);

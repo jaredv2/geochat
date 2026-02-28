@@ -3,66 +3,198 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Admin — GeoChat V3</title>
-<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+<title>Admin — GeoChat</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/style.css">
 </head>
-<body class="page-body">
+<body class="page">
 <header class="topbar">
   <div class="topbar-left">
-    <a href="/" class="logo"><span class="logo-bracket">[</span>GEO<span class="logo-accent">CHAT</span><span class="logo-bracket">]</span><span class="logo-version">v3</span></a>
+    <a href="/" class="logo">GEOCHAT</a>
   </div>
   <div class="topbar-right">
-    <span class="admin-badge">ADMIN</span>
-    <a href="/" class="btn-ghost-sm">map</a>
-    <a href="/logout" class="btn-ghost-sm">exit</a>
+    <span class="admin-tag">ADMIN</span>
+    <a href="/" class="tb-link">map</a>
+    <a href="/logout" class="tb-link">exit</a>
   </div>
 </header>
-<main class="page-main">
-  <div class="page-header">
-    <h1 class="page-title mono">// admin panel</h1>
-    <div class="page-sub">pending reports: {{ reports|length }}</div>
-  </div>
-  {% if not reports %}
-  <div class="empty-mono" style="padding:40px 0">no pending reports</div>
-  {% endif %}
-  {% for r in reports %}
-  <div class="report-card" id="report-{{ r.id }}">
-    <div class="report-head">
-      <span class="mono report-id">#{{ r.id }}</span>
-      <span class="report-place">◈ {{ r.place_name or '?' }}</span>
-      <span class="mono muted" style="margin-left:auto">{{ r.created_at[:16] }}</span>
+
+<!-- Ban reason modal -->
+<div class="overlay" id="banOverlay" style="display:none">
+  <div class="modal">
+    <div class="modal-title">BAN USER</div>
+    <div id="banTargetName" style="font-family:'IBM Plex Mono',monospace;font-size:0.8rem;margin-bottom:12px;color:var(--red)"></div>
+    <textarea id="banReason" class="modal-ta" placeholder="Reason for ban (shown to user)…" maxlength="200"></textarea>
+    <div class="modal-foot">
+      <button class="btn-cancel" onclick="closeBanModal()">Cancel</button>
+      <button class="btn-submit" onclick="confirmBan()">BAN USER</button>
     </div>
-    <div class="report-body">
-      <div class="report-reporter">
-        <img src="{{ r.reporter_avatar }}" class="chip-avatar" alt="">
-        <span class="mono">{{ r.reporter }}</span>
-        <span class="muted"> reported message by </span>
-        <span class="mono">{{ r.author }}</span>
+  </div>
+</div>
+
+<main class="page-wrap" style="max-width:900px">
+  <h1 class="page-title">ADMIN PANEL</h1>
+
+  <!-- Tab bar -->
+  <div class="tab-bar" style="margin-bottom:20px;background:var(--warm-white);border:2px solid var(--ink)">
+    <button class="tab active" id="tab-btn-reports" onclick="showTab('reports',this)">REPORTS ({{ reports|length }})</button>
+    <button class="tab" id="tab-btn-users" onclick="showTab('users',this)">USER MANAGEMENT</button>
+  </div>
+
+  <!-- Reports tab -->
+  <div id="tab-reports">
+    {% if not reports %}
+    <div class="empty-state" style="padding:32px;text-align:center">No pending reports — all clear.</div>
+    {% endif %}
+
+    {% for r in reports %}
+    <div class="report-card" id="rc-{{ r.id }}">
+      <div class="report-top">
+        <span class="report-id">#{{ r.id }}</span>
+        <span>▸ {{ r.place_name or '?' }}</span>
+        <span style="margin-left:auto;color:var(--muted)">{{ r.created_at[:16] }}</span>
       </div>
-      <div class="report-reason"><strong>Reason:</strong> {{ r.reason }}</div>
-      <div class="report-msg">{{ r.content }}</div>
+      <div class="report-body">
+        <div class="report-who">
+          <img src="{{ r.reporter_avatar }}" class="lb-av" alt="">
+          <span class="mono" style="font-size:.8rem">{{ r.reporter }}</span>
+          <span style="color:var(--muted)"> reported </span>
+          <span class="mono" style="font-size:.8rem;color:var(--red)">{{ r.author }}</span>
+        </div>
+        <div class="report-reason"><strong>Reason:</strong> {{ r.reason }}</div>
+        <div class="report-msg-text">{{ r.content }}</div>
+      </div>
+      <div class="report-foot">
+        <button class="btn-cancel" onclick="resolveReport({{ r.id }}, 'dismiss')">Dismiss</button>
+        <button class="btn-submit" style="background:var(--amber);border-color:var(--amber)" onclick="resolveReport({{ r.id }}, 'hide')">Hide Message</button>
+        <button class="btn-submit" onclick="openBanModal({{ r.author_id }}, '{{ r.author|e }}')">Ban Author</button>
+      </div>
     </div>
-    <div class="report-actions">
-      <button class="btn-ghost-sm" onclick="resolve({{ r.id }}, 'dismiss')">dismiss</button>
-      <button class="btn-danger" onclick="resolve({{ r.id }}, 'hide')">hide message</button>
+    {% endfor %}
+  </div>
+
+  <!-- Users tab -->
+  <div id="tab-users" style="display:none">
+    <div style="display:flex;gap:10px;margin-bottom:16px;align-items:center">
+      <input id="userSearchInput" class="search-input" style="flex:1;color:var(--ink);background:var(--warm-white);border:2px solid var(--ink);padding:9px 12px;font-size:.85rem;font-family:'IBM Plex Mono',monospace" placeholder="Search by username…" autocomplete="off">
+    </div>
+    <div id="usersList" style="border:2px solid var(--ink)">
+      <div class="loading-state" style="padding:20px">Loading users…</div>
     </div>
   </div>
-  {% endfor %}
 </main>
+
+<style>
+.user-admin-row {
+  display:flex; align-items:center; gap:12px; padding:11px 16px;
+  border-bottom:1px solid var(--border); background:var(--warm-white);
+  transition:background .1s;
+}
+.user-admin-row:last-child { border-bottom:none }
+.user-admin-row.is-banned { background:#fff5f5; border-left:3px solid var(--red); }
+.ua-name { font-family:'IBM Plex Mono',monospace; font-size:.82rem; font-weight:600; }
+.ua-sub { font-family:'IBM Plex Mono',monospace; font-size:.63rem; color:var(--muted); margin-top:2px; }
+.banned-badge { font-family:'IBM Plex Mono',monospace; font-size:.58rem; background:var(--red); color:#fff; padding:2px 5px; letter-spacing:.06em; margin-left:7px; vertical-align:middle; }
+</style>
+
 <script>
-async function resolve(rid, action) {
+let banTargetId = null;
+let userSearchTimer;
+
+function showTab(name, btn) {
+  document.getElementById('tab-reports').style.display = name === 'reports' ? '' : 'none';
+  document.getElementById('tab-users').style.display   = name === 'users'   ? '' : 'none';
+  document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  if (name === 'users') loadUsers();
+}
+
+async function resolveReport(rid, action) {
   const res = await fetch(`/api/admin/report/${rid}`, {
     method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({action})
+    body: JSON.stringify({ action })
   });
   if (res.ok) {
-    const card = document.getElementById('report-'+rid);
-    card.style.opacity = '0.3';
-    card.style.pointerEvents = 'none';
-    card.querySelector('.report-actions').innerHTML = `<span class="mono muted">${action}d</span>`;
+    const card = document.getElementById('rc-'+rid);
+    if (card) {
+      card.style.opacity = '0.4'; card.style.pointerEvents = 'none';
+      card.querySelector('.report-foot').innerHTML =
+        `<span class="mono" style="font-size:.75rem;color:var(--muted)">${action}d</span>`;
+    }
   }
 }
+
+function openBanModal(uid, name) {
+  banTargetId = uid;
+  document.getElementById('banTargetName').textContent = 'Banning: ' + name;
+  document.getElementById('banReason').value = '';
+  document.getElementById('banOverlay').style.display = 'flex';
+}
+
+function closeBanModal() {
+  document.getElementById('banOverlay').style.display = 'none';
+  banTargetId = null;
+}
+
+async function confirmBan() {
+  if (!banTargetId) return;
+  const reason = document.getElementById('banReason').value.trim();
+  if (!reason) { alert('Please enter a ban reason.'); return; }
+  const res = await fetch(`/api/admin/ban/${banTargetId}`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ reason })
+  });
+  const d = await res.json();
+  if (res.ok) { closeBanModal(); loadUsers(); }
+  else alert(d.error || 'Failed to ban user.');
+}
+
+async function unbanUser(uid) {
+  if (!confirm('Unban this user?')) return;
+  const res = await fetch(`/api/admin/unban/${uid}`, { method: 'POST' });
+  if (res.ok) loadUsers();
+}
+
+async function loadUsers() {
+  const q = document.getElementById('userSearchInput')?.value.trim() || '';
+  const url = '/api/admin/users' + (q ? '?q=' + encodeURIComponent(q) : '');
+  const list = document.getElementById('usersList');
+  if (!list) return;
+  list.innerHTML = '<div class="loading-state" style="padding:20px">Loading…</div>';
+  try {
+    const users = await (await fetch(url)).json();
+    if (!Array.isArray(users) || !users.length) {
+      list.innerHTML = '<div class="empty-state" style="padding:20px;text-align:center">No users found.</div>';
+      return;
+    }
+    list.innerHTML = users.map(u => `
+      <div class="user-admin-row${u.is_banned ? ' is-banned' : ''}">
+        <img src="${e(u.avatar_url||'')}" style="width:30px;height:30px;object-fit:cover;border:1px solid var(--border);flex-shrink:0">
+        <div style="flex:1;min-width:0">
+          <div class="ua-name">
+            ${e(u.username)}
+            ${u.is_banned ? '<span class="banned-badge">BANNED</span>' : ''}
+          </div>
+          <div class="ua-sub">${u.post_count} posts · joined ${u.created_at.slice(0,10)}${u.is_banned && u.ban_reason ? ' · "' + e(u.ban_reason) + '"' : ''}</div>
+        </div>
+        <div style="display:flex;gap:6px;flex-shrink:0;align-items:center">
+          <a href="/profile/${u.id}" class="btn-xs bx-ghost" style="text-decoration:none" target="_blank">Profile</a>
+          ${u.is_banned
+            ? `<button class="btn-xs bx-ghost" style="color:var(--green);border-color:var(--green)" onclick="unbanUser(${u.id})">UNBAN</button>`
+            : `<button class="btn-xs bx-danger" onclick="openBanModal(${u.id}, '${e(u.username)}')">BAN</button>`}
+        </div>
+      </div>`).join('');
+  } catch(err) {
+    list.innerHTML = '<div class="empty-state" style="padding:20px">Error loading users.</div>';
+  }
+}
+
+document.getElementById('userSearchInput')?.addEventListener('input', () => {
+  clearTimeout(userSearchTimer);
+  userSearchTimer = setTimeout(loadUsers, 280);
+});
+
+function e(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 </script>
 </body>
 </html>

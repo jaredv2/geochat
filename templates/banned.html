@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Banned — GeoChat</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;600&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --parchment: #f5f0e6;
+  --ink: #1a1612;
+  --red: #c0392b;
+  --muted: #8a7d6e;
+  --border: #c8bba8;
+}
+html, body { height: 100%; background: var(--parchment); color: var(--ink); font-family: 'IBM Plex Sans', sans-serif; display: flex; align-items: center; justify-content: center; }
+.ban-wrap {
+  max-width: 480px; width: 100%; padding: 0 24px;
+  text-align: center;
+}
+.ban-stamp {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 4rem; font-weight: 600; color: var(--red);
+  border: 6px solid var(--red); display: inline-block;
+  padding: 6px 28px; letter-spacing: 0.12em;
+  transform: rotate(-4deg); margin-bottom: 32px;
+  line-height: 1; user-select: none;
+  text-shadow: 2px 2px 0 rgba(192,57,43,0.25);
+}
+.ban-title {
+  font-family: 'IBM Plex Mono', monospace; font-size: 1rem;
+  font-weight: 600; letter-spacing: 0.06em; margin-bottom: 14px;
+  text-transform: uppercase;
+}
+.ban-reason {
+  background: #fff; border: 2px solid var(--ink); padding: 14px 18px;
+  font-size: 0.9rem; line-height: 1.6; color: var(--ink);
+  margin-bottom: 24px; text-align: left;
+}
+.ban-reason-label {
+  font-family: 'IBM Plex Mono', monospace; font-size: 0.65rem;
+  color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em;
+  display: block; margin-bottom: 6px;
+}
+.ban-sub {
+  font-family: 'IBM Plex Mono', monospace; font-size: 0.72rem;
+  color: var(--muted); line-height: 1.6;
+}
+.ban-sub a { color: var(--red); text-decoration: none; }
+.ban-sub a:hover { text-decoration: underline; }
+.ban-hr { border: none; border-top: 2px solid var(--border); margin: 28px 0; }
+</style>
+</head>
+<body>
+<div class="ban-wrap">
+  <div class="ban-stamp">BANNED</div>
+  <p class="ban-title">Your account has been suspended</p>
+  <div class="ban-reason">
+    <span class="ban-reason-label">Reason</span>
+    {{ reason }}
+  </div>
+  <hr class="ban-hr">
+  <p class="ban-sub">
+    You have been banned from GeoChat by an administrator.<br>
+    If you believe this is a mistake, contact the server admin.
+  </p>
+</div>
+</body>
+</html>
