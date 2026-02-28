@@ -826,20 +826,26 @@ def post_message():
                              (parent_id,)).fetchone()
         if not parent or parent['location_id'] != lid:
             return jsonify({'error': 'Invalid parent'}), 400
-# Change this:
-# cur = db.execute("INSERT ...")
-# mid = cur.lastrowid
-
-# To this:
-    if getattr(g, 'db_type', 'sqlite') == 'postgres':
-        cur = db.cursor()
-        cur.execute("INSERT INTO messages (...) VALUES (...) RETURNING id", (args...))
-        mid = cur.fetchone()[0]
-        db.commit()
-    else:
-        cur = db.execute("INSERT INTO messages (...) VALUES (...)", (args...))
-        mid = cur.lastrowid
-        db.commit()
+# PostgreSQL version
+if getattr(g, 'db_type', 'sqlite') == 'postgres':
+    cur = db.cursor()
+    # Replace the '...' below with your actual column names and values
+    cur.execute(
+        "INSERT INTO messages (room_id, user_id, username, avatar, content, timestamp) "
+        "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id", 
+        (room_id, user_id, username, avatar, content, timestamp)
+    )
+    mid = cur.fetchone()[0]
+    db.commit()
+else:
+    # SQLite version (original)
+    cur = db.execute(
+        "INSERT INTO messages (room_id, user_id, username, avatar, content, timestamp) "
+        "VALUES (?, ?, ?, ?, ?, ?)", 
+        (room_id, user_id, username, avatar, content, timestamp)
+    )
+    mid = cur.lastrowid
+    db.commit()
     db.execute("UPDATE locations SET message_count=message_count+1,last_user_id=%s,last_user_avatar=%s WHERE id=%s",
                (u['id'], u['avatar_url'], lid))
     if not parent_id:
