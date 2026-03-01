@@ -26,6 +26,9 @@ from psycopg2.pool import ThreadedConnectionPool
 from flask import (Flask, render_template, request, redirect,
                    session, jsonify, g, Response, stream_with_context, abort)
 import requests as _requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ── HTTP session (no retry — Discord rate-limit backoff makes callbacks slow) ─
 _http = _requests.Session()
