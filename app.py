@@ -10,23 +10,37 @@ Required environment variables:
 Optional:
   ADMIN_DISCORD_ID       Your Discord user ID for admin panel access
   LIBRETRANSLATE_URL     LibreTranslate instance URL for message translation
+  DATABASE_PATH          SQLite file path (default: ./database.db)
   PORT                   HTTP port (default: 8000)
 
 Deploy:
   See README.md for Render + UptimeRobot free deployment guide.
 """
 
-import os, secrets, html, json, queue, threading, unicodedata, re
+import os, sqlite3, secrets, html, json, queue, threading, unicodedata, re
 from flask import (Flask, render_template, request, redirect,
                    session, jsonify, g, Response, stream_with_context, abort)
 import requests as http
-import psycopg
-from psycopg.rows import dict_row
-from urllib.parse import urlparse
-from dotenv import load_dotenv
-# ... rest of imports
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# ── Shared HTTP session (browser-like UA, retry on transient errors) ───────────
+_http = http.Session()
+_http.headers.update({
+    'User-Agent': 'GeoChat/1.0 (https://github.com/geochat; contact@geochat.app)',
+    'Accept': 'application/json',
+})
+_retry = Retry(
+    total=3,
+    backoff_factor=0.8,          # waits: 0.8s, 1.6s, 3.2s
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET", "POST"],
+    raise_on_status=False,
+)
+_http.mount('https://', HTTPAdapter(max_retries=_retry))
+_http.mount('http://',  HTTPAdapter(max_retries=_retry))
+
 app = Flask(__name__)
-load_dotenv()
 
 # ── Secret key ────────────────────────────────────────────────────────────────
 _env_key = os.environ.get('SECRET_KEY', '')
@@ -62,6 +76,8 @@ DISCORD_REDIRECT_URI  = os.environ.get('DISCORD_REDIRECT_URI', f'http://localhos
 DISCORD_API           = 'https://discord.com/api/v10'
 ADMIN_DISCORD_ID      = os.environ.get('ADMIN_DISCORD_ID', '')
 LIBRETRANSLATE_URL    = os.environ.get('LIBRETRANSLATE_URL', '')
+DATABASE              = os.environ.get('DATABASE_PATH',
+                            os.path.join(os.path.dirname(__file__), 'database.db'))
 ONLINE_WINDOW_SECS    = 120  # user considered online if seen within 2 min
 
 BADGE_DEFS = {
@@ -130,23 +146,23 @@ def _cleanup_loop():
                 orphans = db.execute("""
                     SELECT id FROM locations
                     WHERE message_count = 0
-                    AND created_at < NOW() - INTERVAL '5 minutes'
+                    AND created_at < datetime('now', '-5 minutes')
                 """).fetchall()
                 for row in orphans:
                     lid = row['id']
                     # Double-check no messages exist (count could be stale)
                     real = db.execute(
-                        "SELECT COUNT(*) FROM messages WHERE location_id=%s", (lid,)
+                        "SELECT COUNT(*) FROM messages WHERE location_id=?", (lid,)
                     ).fetchone()[0]
                     if real == 0:
-                        db.execute("DELETE FROM online_presence WHERE location_id=%s", (lid,))
-                        db.execute("DELETE FROM locations WHERE id=%s", (lid,))
+                        db.execute("DELETE FROM online_presence WHERE location_id=?", (lid,))
+                        db.execute("DELETE FROM locations WHERE id=?", (lid,))
                 if orphans:
                     db.commit()
                     log.info("Cleanup: removed %d orphan location(s)", len(orphans))
                 # Also clean stale presence records
                 db.execute("""DELETE FROM online_presence
-                              WHERE last_seen < NOW() - INTERVAL '10 minutes'""")
+                              WHERE last_seen < datetime('now', '-10 minutes')""")
                 db.commit()
                 close_db()
         except Exception as e:
@@ -158,33 +174,22 @@ _cleanup_thread.start()
 # ── DB ────────────────────────────────────────────────────────────────────────
 def get_db():
     if 'db' not in g:
-        db_url = os.environ.get('DATABASE_URL')
-        conn = psycopg.connect(db_url)
-        conn.row_factory = psycopg.rows.dict_row
-        g.db = conn
+        g.db = sqlite3.connect(DATABASE)
+        g.db.row_factory = sqlite3.Row
+        g.db.execute("PRAGMA foreign_keys = ON")
+        g.db.execute("PRAGMA journal_mode = WAL")
     return g.db
 
 @app.teardown_appcontext
 def close_db(e=None):
     db = g.pop('db', None)
-    if db is not None:
-        db.close()
+    if db: db.close()
 
-def query_db(query, args=(), one=False):
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute(query, args)
-    if query.strip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
-        db.commit()
-        return cursor
-    rv = cursor.fetchall()
-    cursor.close()
-    return (rv[0] if rv else None) if one else rv
 def init_db():
     with app.app_context():
         db = get_db()
         with open(os.path.join(os.path.dirname(__file__), 'schema.sql')) as f:
-            db.execute(f.read())
+            db.executescript(f.read())
         db.commit()
         # Migrate rate_limits if FK version
         try:
@@ -192,19 +197,14 @@ def init_db():
             db.execute("DELETE FROM rate_limits WHERE user_id=0")
             db.commit()
         except Exception:
-            db.rollback()
             db.execute("DROP TABLE IF EXISTS rate_limits")
             db.execute("""CREATE TABLE rate_limits(
-                id SERIAL PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL, action TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP)""")
             db.commit()
         # Migrate ban columns if missing
-        cols_result = db.execute("""
-            SELECT column_name FROM information_schema.columns
-            WHERE table_name='users'
-        """).fetchall()
-        cols = [r['column_name'] for r in cols_result]
+        cols = [r[1] for r in db.execute("PRAGMA table_info(users)").fetchall()]
         if 'is_banned' not in cols:
             db.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0")
             db.commit()
@@ -212,11 +212,7 @@ def init_db():
             db.execute("ALTER TABLE users ADD COLUMN ban_reason TEXT")
             db.commit()
         # Migrate top_content on locations
-        loc_cols_result = db.execute("""
-            SELECT column_name FROM information_schema.columns
-            WHERE table_name='locations'
-        """).fetchall()
-        loc_cols = [r['column_name'] for r in loc_cols_result]
+        loc_cols = [r[1] for r in db.execute("PRAGMA table_info(locations)").fetchall()]
         if 'top_content' not in loc_cols:
             db.execute("ALTER TABLE locations ADD COLUMN top_content TEXT")
             db.commit()
@@ -225,7 +221,7 @@ def init_db():
 def check_banned():
     """Call at start of any route that a banned user should not access."""
     if 'user_id' not in session: return
-    row = get_db().execute("SELECT is_banned, ban_reason FROM users WHERE id=%s",
+    row = get_db().execute("SELECT is_banned, ban_reason FROM users WHERE id=?",
                            (session['user_id'],)).fetchone()
     if row and row['is_banned']:
         reason = row['ban_reason'] or 'No reason given.'
@@ -237,7 +233,7 @@ def current_user():
     if 'user_id' not in session: return None
     # Guard against stale sessions (DB was wiped, user deleted, etc.)
     row = get_db().execute(
-        "SELECT id, username, avatar_url, is_admin, is_banned FROM users WHERE id=%s",
+        "SELECT id, username, avatar_url, is_admin, is_banned FROM users WHERE id=?",
         (session['user_id'],)).fetchone()
     if not row:
         session.clear()
@@ -251,24 +247,24 @@ def current_user():
 def check_rate_limit(user_id, action):
     limit, window = RATE_LIMITS.get(action, (10, 60))
     db = get_db()
-    db.execute("DELETE FROM rate_limits WHERE action=%s AND created_at < NOW() - ((%s || ' seconds')::INTERVAL)",
-               (action, str(window)))
-    count = db.execute("SELECT COUNT(*) FROM rate_limits WHERE user_id=%s AND action=%s",
+    db.execute("DELETE FROM rate_limits WHERE action=? AND created_at < datetime('now',? || ' seconds')",
+               (action, f'-{window}'))
+    count = db.execute("SELECT COUNT(*) FROM rate_limits WHERE user_id=? AND action=?",
                        (user_id, action)).fetchone()[0]
     if count >= limit: return False
-    db.execute("INSERT INTO rate_limits (user_id,action) VALUES (%s,%s)", (user_id, action))
+    db.execute("INSERT INTO rate_limits (user_id,action) VALUES (?,?)", (user_id, action))
     db.commit()
     return True
 
 def get_reactions(mid, uid=None):
     db = get_db()
     rows = db.execute(
-        "SELECT emoji, COUNT(*) as cnt FROM reactions WHERE message_id=%s GROUP BY emoji ORDER BY cnt DESC",
+        "SELECT emoji, COUNT(*) as cnt FROM reactions WHERE message_id=? GROUP BY emoji ORDER BY cnt DESC",
         (mid,)).fetchall()
     mine = set()
     if uid:
         mine = {r['emoji'] for r in db.execute(
-            "SELECT emoji FROM reactions WHERE message_id=%s AND user_id=%s", (mid, uid)).fetchall()}
+            "SELECT emoji FROM reactions WHERE message_id=? AND user_id=?", (mid, uid)).fetchall()}
     return [{'emoji': r['emoji'], 'count': r['cnt'], 'reacted': r['emoji'] in mine} for r in rows]
 
 def fmt_msg(row, uid=None, replies=None):
@@ -277,22 +273,22 @@ def fmt_msg(row, uid=None, replies=None):
     d['reactions'] = get_reactions(d['id'], uid)
     d['user_vote'] = 0
     if uid:
-        v = get_db().execute("SELECT value FROM votes WHERE message_id=%s AND user_id=%s",
+        v = get_db().execute("SELECT value FROM votes WHERE message_id=? AND user_id=?",
                               (d['id'], uid)).fetchone()
         if v: d['user_vote'] = v['value']
     return d
 
 def get_online_count(lid):
     return get_db().execute(
-        "SELECT COUNT(DISTINCT user_id) FROM online_presence WHERE location_id=%s AND last_seen > NOW() - ((%s || ' seconds')::INTERVAL)",
-        (lid, str(ONLINE_WINDOW_SECS))).fetchone()[0]
+        "SELECT COUNT(DISTINCT user_id) FROM online_presence WHERE location_id=? AND last_seen > datetime('now',? || ' seconds')",
+        (lid, f'-{ONLINE_WINDOW_SECS}')).fetchone()[0]
 
 def touch_presence(uid, lid):
     if not uid: return
     db = get_db()
     try:
         db.execute("""INSERT INTO online_presence (user_id, location_id, last_seen)
-                      VALUES (%s,%s, CURRENT_TIMESTAMP)
+                      VALUES (?,?, CURRENT_TIMESTAMP)
                       ON CONFLICT(user_id, location_id) DO UPDATE SET last_seen=CURRENT_TIMESTAMP""",
                    (uid, lid))
         db.commit()
@@ -325,7 +321,7 @@ def has_non_latin(text):
 def translate_place_to_english(text):
     """Try LibreTranslate to get an English version of a place name."""
     try:
-        res = http.post(f"{LIBRETRANSLATE_URL}/translate",
+        res = _http.post(f"{LIBRETRANSLATE_URL}/translate",
                         json={'q': text, 'source': 'auto', 'target': 'en', 'format': 'text'},
                         timeout=3)
         if res.ok:
@@ -339,14 +335,14 @@ def translate_place_to_english(text):
 def award_badges(user_id):
     from datetime import datetime
     db = get_db()
-    u  = db.execute("SELECT post_count FROM users WHERE id=%s", (user_id,)).fetchone()
+    u  = db.execute("SELECT post_count FROM users WHERE id=?", (user_id,)).fetchone()
     if not u: return []
-    earned = {r['badge'] for r in db.execute("SELECT badge FROM badges WHERE user_id=%s", (user_id,)).fetchall()}
+    earned = {r['badge'] for r in db.execute("SELECT badge FROM badges WHERE user_id=?", (user_id,)).fetchall()}
     new_badges = []
 
     def give(badge):
         if badge not in earned:
-            db.execute("INSERT INTO badges (user_id,badge) VALUES (%s,%s) ON CONFLICT DO NOTHING", (user_id, badge))
+            db.execute("INSERT OR IGNORE INTO badges (user_id,badge) VALUES (?,?)", (user_id, badge))
             new_badges.append(badge)
 
     pc = u['post_count']
@@ -354,20 +350,20 @@ def award_badges(user_id):
     if pc >= 25:  give('veteran')
     if pc >= 100: give('centurion')
 
-    locs = db.execute("SELECT COUNT(DISTINCT location_id) FROM messages WHERE user_id=%s AND parent_id IS NULL",
+    locs = db.execute("SELECT COUNT(DISTINCT location_id) FROM messages WHERE user_id=? AND parent_id IS NULL",
                       (user_id,)).fetchone()[0]
     if locs >= 5:  give('explorer')
     if locs >= 20: give('globe')
     if locs >= 50: give('cartographer')
 
-    replies = db.execute("SELECT COUNT(*) FROM messages WHERE user_id=%s AND parent_id IS NOT NULL",
+    replies = db.execute("SELECT COUNT(*) FROM messages WHERE user_id=? AND parent_id IS NOT NULL",
                          (user_id,)).fetchone()[0]
     if replies >= 20: give('debater')
 
-    total_reactions = db.execute("SELECT COUNT(*) FROM reactions WHERE user_id=%s", (user_id,)).fetchone()[0]
+    total_reactions = db.execute("SELECT COUNT(*) FROM reactions WHERE user_id=?", (user_id,)).fetchone()[0]
     if total_reactions >= 30: give('reactor')
 
-    score = db.execute("SELECT COALESCE(SUM(score),0) FROM messages WHERE user_id=%s",
+    score = db.execute("SELECT COALESCE(SUM(score),0) FROM messages WHERE user_id=?",
                        (user_id,)).fetchone()[0]
     if score >= 10:  give('popular')
     if score >= 50:  give('loved')
@@ -381,12 +377,44 @@ def award_badges(user_id):
     return new_badges
 
 # ── OAuth ─────────────────────────────────────────────────────────────────────
+def _auth_error(title, detail=''):
+    """Render a friendly login error page."""
+    html_page = f'''<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Login Error — GeoChat</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;600&display=swap" rel="stylesheet">
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:"IBM Plex Sans",sans-serif;background:#f5f0e6;color:#1a1612;
+      display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}}
+.box{{max-width:460px;width:100%;border:3px solid #1a1612;background:#faf7f2;
+      box-shadow:6px 6px 0 rgba(26,22,18,.25);padding:32px}}
+.icon{{font-size:2.5rem;margin-bottom:16px}}
+h1{{font-family:"IBM Plex Mono",monospace;font-size:1rem;font-weight:600;
+    text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px;color:#c0392b}}
+p{{font-size:.9rem;line-height:1.7;color:#4a4035;margin-bottom:20px}}
+.hint{{font-family:"IBM Plex Mono",monospace;font-size:.72rem;color:#8a7d6e;
+       background:#ede7d5;border-left:3px solid #c0392b;padding:10px 12px;margin-bottom:24px}}
+a.btn{{display:inline-block;background:#1a1612;color:#f5f0e6;padding:11px 22px;
+       font-family:"IBM Plex Mono",monospace;font-size:.8rem;font-weight:600;
+       text-decoration:none;letter-spacing:.06em}}
+a.btn:hover{{background:#c0392b}}
+</style></head>
+<body><div class="box">
+  <div class="icon">⚠</div>
+  <h1>Login Error</h1>
+  <p>{title}</p>
+  {'<div class="hint">' + detail + '</div>' if detail else ''}
+  <a class="btn" href="/login">← Try Again</a>
+</div></body></html>'''
+    return Response(html_page, status=400, mimetype='text/html')
+
 @app.route('/login')
 def login():
     state = secrets.token_urlsafe(24)
     db = get_db()
-    db.execute("DELETE FROM oauth_states WHERE created_at < NOW() - INTERVAL '10 minutes'")
-    db.execute("INSERT INTO oauth_states (state) VALUES (%s)", (state,))
+    db.execute("DELETE FROM oauth_states WHERE created_at < datetime('now','-10 minutes')")
+    db.execute("INSERT INTO oauth_states (state) VALUES (?)", (state,))
     db.commit()
     from urllib.parse import urlencode
     p = urlencode({'client_id': DISCORD_CLIENT_ID, 'redirect_uri': DISCORD_REDIRECT_URI,
@@ -396,20 +424,54 @@ def login():
 @app.route('/callback')
 def callback():
     code, state = request.args.get('code'), request.args.get('state')
-    if not code or not state: return "Missing params. <a href='/login'>Retry</a>", 400
+    if not code or not state:
+        return _auth_error("Login link expired or invalid.", "Try logging in again.")
     db = get_db()
-    if not db.execute("SELECT id FROM oauth_states WHERE state=%s", (state,)).fetchone():
-        return "Invalid state. <a href='/login'>Retry</a>", 400
-    db.execute("DELETE FROM oauth_states WHERE state=%s", (state,))
+    if not db.execute("SELECT id FROM oauth_states WHERE state=?", (state,)).fetchone():
+        return _auth_error("Invalid login state.", "This can happen if you opened multiple login tabs. Please try again.")
+    db.execute("DELETE FROM oauth_states WHERE state=?", (state,))
     db.commit()
-    tr = http.post(f"{DISCORD_API}/oauth2/token", data={
-        'client_id': DISCORD_CLIENT_ID, 'client_secret': DISCORD_CLIENT_SECRET,
-        'grant_type': 'authorization_code', 'code': code, 'redirect_uri': DISCORD_REDIRECT_URI},
-        headers={'Content-Type': 'application/x-www-form-urlencoded'})
-    if not tr.ok: return f"Token error: {tr.text}", 400
-    ur = http.get(f"{DISCORD_API}/users/@me",
-                  headers={'Authorization': f"Bearer {tr.json()['access_token']}"})
-    if not ur.ok: return "User fetch failed.", 400
+
+    # Exchange code for token — use shared session with retry + proper UA
+    try:
+        tr = _http.post(
+            f"{DISCORD_API}/oauth2/token",
+            data={
+                'client_id':     DISCORD_CLIENT_ID,
+                'client_secret': DISCORD_CLIENT_SECRET,
+                'grant_type':    'authorization_code',
+                'code':          code,
+                'redirect_uri':  DISCORD_REDIRECT_URI,
+            },
+            headers={'Content-Type': 'application/x-www-form-urlencoded'},
+            timeout=10,
+        )
+    except Exception as e:
+        return _auth_error("Could not reach Discord.", "Check your connection and try again.")
+
+    if tr.status_code == 429:
+        return _auth_error(
+            "Discord is rate-limiting this server.",
+            "Please wait 30 seconds and try again. This is a temporary issue with shared hosting."
+        )
+    if not tr.ok:
+        return _auth_error("Discord login failed.", f"Discord returned: {tr.status_code}. Please try again.")
+
+    access_token = tr.json().get('access_token')
+    if not access_token:
+        return _auth_error("No access token returned.", "Please try logging in again.")
+
+    try:
+        ur = _http.get(
+            f"{DISCORD_API}/users/@me",
+            headers={'Authorization': f"Bearer {access_token}"},
+            timeout=8,
+        )
+    except Exception:
+        return _auth_error("Could not fetch your Discord profile.", "Please try again.")
+
+    if not ur.ok:
+        return _auth_error("Discord profile fetch failed.", f"Status: {ur.status_code}")
     u   = ur.json()
     did = u['id']
     username = u['username']
@@ -417,13 +479,13 @@ def callback():
                 if u.get('avatar') else
                 f"https://cdn.discordapp.com/embed/avatars/{int(did)%5}.png")
     is_admin = 1 if (ADMIN_DISCORD_ID and did == ADMIN_DISCORD_ID) else 0
-    db.execute("""INSERT INTO users (discord_id,username,avatar_url,is_admin) VALUES (%s,%s,%s,%s)
+    db.execute("""INSERT INTO users (discord_id,username,avatar_url,is_admin) VALUES (?,?,?,?)
                   ON CONFLICT(discord_id) DO UPDATE SET
                     username=excluded.username, avatar_url=excluded.avatar_url,
                     is_admin=MAX(is_admin, excluded.is_admin)""",
                (did, username, avatar, is_admin))
     db.commit()
-    row = db.execute("SELECT id, is_admin, is_banned, ban_reason FROM users WHERE discord_id=%s", (did,)).fetchone()
+    row = db.execute("SELECT id, is_admin, is_banned, ban_reason FROM users WHERE discord_id=?", (did,)).fetchone()
     if row and row['is_banned']:
         reason = row['ban_reason'] or 'No reason given.'
         return Response(render_template('banned.html', reason=reason), status=403)
@@ -449,10 +511,10 @@ def profile(uid=None):
         if not u: return redirect('/login')
         uid = u['id']
     db  = get_db()
-    pu  = db.execute("SELECT id,username,avatar_url,post_count,created_at FROM users WHERE id=%s",
+    pu  = db.execute("SELECT id,username,avatar_url,post_count,created_at FROM users WHERE id=?",
                      (uid,)).fetchone()
     if not pu: return "Not found", 404
-    ub  = db.execute("SELECT badge,earned_at FROM badges WHERE user_id=%s ORDER BY earned_at",
+    ub  = db.execute("SELECT badge,earned_at FROM badges WHERE user_id=? ORDER BY earned_at",
                      (uid,)).fetchall()
     return render_template('profile.html', profile_user=dict(pu), current_user=current_user(),
                            badges=[dict(b) for b in ub], badge_defs=BADGE_DEFS)
@@ -475,7 +537,7 @@ def leaderboard():
         'total_messages': db.execute("SELECT COUNT(*) FROM messages WHERE hidden=0").fetchone()[0],
         'total_locations':db.execute("SELECT COUNT(*) FROM locations WHERE message_count>0").fetchone()[0],
         'online_users':   db.execute(
-            f"SELECT COUNT(DISTINCT user_id) FROM online_presence WHERE last_seen > NOW() - INTERVAL '{ONLINE_WINDOW_SECS} seconds'"
+            f"SELECT COUNT(DISTINCT user_id) FROM online_presence WHERE last_seen > datetime('now','-{ONLINE_WINDOW_SECS} seconds')"
         ).fetchone()[0],
     }
     return render_template('leaderboard.html',
@@ -538,7 +600,7 @@ def global_stats():
         'total_messages': db.execute("SELECT COUNT(*) FROM messages WHERE hidden=0").fetchone()[0],
         'total_locations':db.execute("SELECT COUNT(*) FROM locations WHERE message_count>0").fetchone()[0],
         'online_users':   db.execute(
-            f"SELECT COUNT(DISTINCT user_id) FROM online_presence WHERE last_seen > NOW() - INTERVAL '{ONLINE_WINDOW_SECS} seconds'"
+            f"SELECT COUNT(DISTINCT user_id) FROM online_presence WHERE last_seen > datetime('now','-{ONLINE_WINDOW_SECS} seconds')"
         ).fetchone()[0],
     })
 
@@ -557,7 +619,7 @@ def nearby():
     rows = db.execute("""
         SELECT id,latitude,longitude,place_name,message_count,last_user_avatar,last_user_id,top_content
         FROM locations
-        WHERE latitude BETWEEN %s AND %s AND longitude BETWEEN %s AND %s
+        WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
         ORDER BY message_count DESC LIMIT 300
     """, (lat-dlat, lat+dlat, lng-dlng, lng+dlng)).fetchall()
 
@@ -593,27 +655,26 @@ def create_location():
     place = html.escape(str(data.get('place_name', 'Unknown'))[:200])
     db    = get_db()
     ex    = db.execute("""SELECT id,place_name,message_count,last_user_avatar,top_content FROM locations
-                          WHERE ABS(latitude-%s) < 0.0001 AND ABS(longitude-%s) < 0.0001 LIMIT 1""",
+                          WHERE ABS(latitude-?) < 0.0001 AND ABS(longitude-?) < 0.0001 LIMIT 1""",
                        (lat, lng)).fetchone()
     if ex: return jsonify(dict(ex))
     # Verify user actually exists in DB (stale session guard)
     uid_safe = None
     avatar_safe = None
     if u:
-        row = db.execute("SELECT id, avatar_url FROM users WHERE id=%s", (u['id'],)).fetchone()
+        row = db.execute("SELECT id, avatar_url FROM users WHERE id=?", (u['id'],)).fetchone()
         if row:
             uid_safe    = row['id']
             avatar_safe = row['avatar_url']
-    cur = db.execute("INSERT INTO locations (latitude,longitude,place_name,last_user_id) VALUES (%s,%s,%s,%s) RETURNING id",
+    cur = db.execute("INSERT INTO locations (latitude,longitude,place_name,last_user_id) VALUES (?,?,?,?)",
                      (lat, lng, place, uid_safe))
     db.commit()
-    new_id = cur.fetchone()['id']
-    return jsonify({'id': new_id, 'place_name': place, 'message_count': 0,
+    return jsonify({'id': cur.lastrowid, 'place_name': place, 'message_count': 0,
                     'last_user_avatar': avatar_safe, 'top_content': None}), 201
 
 @app.route('/api/location/<int:lid>')
 def get_location(lid):
-    row = get_db().execute("SELECT * FROM locations WHERE id=%s", (lid,)).fetchone()
+    row = get_db().execute("SELECT * FROM locations WHERE id=?", (lid,)).fetchone()
     if not row: return jsonify({'error': 'Not found'}), 404
     return jsonify(dict(row))
 
@@ -621,12 +682,12 @@ def get_location(lid):
 def delete_empty_location(lid):
     u  = current_user()
     db = get_db()
-    row = db.execute("SELECT message_count,last_user_id FROM locations WHERE id=%s", (lid,)).fetchone()
+    row = db.execute("SELECT message_count,last_user_id FROM locations WHERE id=?", (lid,)).fetchone()
     if not row: return jsonify({'ok': True})
     if row['message_count'] > 0: return jsonify({'error': 'Has messages'}), 400
     # Only allow creator to delete their empty marker
     if u and row['last_user_id'] != u['id']: return jsonify({'error': 'Forbidden'}), 403
-    db.execute("DELETE FROM locations WHERE id=%s AND message_count=0", (lid,))
+    db.execute("DELETE FROM locations WHERE id=? AND message_count=0", (lid,))
     db.commit()
     return jsonify({'ok': True})
 
@@ -639,7 +700,7 @@ def search():
     q = request.args.get('q','').strip()
     if len(q) < 2: return jsonify([])
     rows = get_db().execute(
-        "SELECT id,latitude,longitude,place_name,message_count FROM locations WHERE place_name LIKE %s ORDER BY message_count DESC LIMIT 8",
+        "SELECT id,latitude,longitude,place_name,message_count FROM locations WHERE place_name LIKE ? ORDER BY message_count DESC LIMIT 8",
         (f'%{q}%',)).fetchall()
     return jsonify([dict(r) for r in rows])
 
@@ -649,10 +710,10 @@ def search_world():
     q = request.args.get('q','').strip()
     if len(q) < 2: return jsonify([])
     try:
-        res = http.get('https://nominatim.openstreetmap.org/search', params={
+        res = _http.get('https://nominatim.openstreetmap.org/search', params={
             'q': q, 'format': 'json', 'limit': 6, 'addressdetails': 1,
             'accept-language': 'en',
-        }, headers={'User-Agent': 'GeoChat/4.0'}, timeout=5)
+        }, timeout=5)
         if not res.ok: return jsonify([])
         results = []
         for item in res.json():
@@ -696,10 +757,10 @@ def ban_user(target_uid):
     data   = request.get_json(silent=True) or {}
     reason = html.escape(data.get('reason','No reason given.')[:200])
     db     = get_db()
-    row    = db.execute("SELECT is_admin FROM users WHERE id=%s", (target_uid,)).fetchone()
+    row    = db.execute("SELECT is_admin FROM users WHERE id=?", (target_uid,)).fetchone()
     if not row: return jsonify({'error': 'Not found'}), 404
     if row['is_admin']: return jsonify({'error': 'Cannot ban an admin'}), 400
-    db.execute("UPDATE users SET is_banned=1, ban_reason=%s WHERE id=%s", (reason, target_uid))
+    db.execute("UPDATE users SET is_banned=1, ban_reason=? WHERE id=?", (reason, target_uid))
     db.commit()
     return jsonify({'ok': True})
 
@@ -708,7 +769,7 @@ def unban_user(target_uid):
     u = current_user()
     if not u or not u['is_admin']: return jsonify({'error': 'Forbidden'}), 403
     db = get_db()
-    db.execute("UPDATE users SET is_banned=0, ban_reason=NULL WHERE id=%s", (target_uid,))
+    db.execute("UPDATE users SET is_banned=0, ban_reason=NULL WHERE id=?", (target_uid,))
     db.commit()
     return jsonify({'ok': True})
 
@@ -722,7 +783,7 @@ def admin_users():
     if q:
         rows = db.execute("""
             SELECT id, username, avatar_url, post_count, is_banned, ban_reason, created_at
-            FROM users WHERE username LIKE %s AND is_admin=0
+            FROM users WHERE username LIKE ? AND is_admin=0
             ORDER BY created_at DESC LIMIT 30
         """, (f'%{q}%',)).fetchall()
     else:
@@ -739,13 +800,13 @@ def get_messages(lid):
     u   = current_user(); uid = u['id'] if u else None
     db  = get_db()
     if uid: touch_presence(uid, lid)
-    if not db.execute("SELECT id FROM locations WHERE id=%s", (lid,)).fetchone():
+    if not db.execute("SELECT id FROM locations WHERE id=?", (lid,)).fetchone():
         return jsonify({'error': 'Not found'}), 404
     top = db.execute("""
         SELECT m.id,m.content,m.score,m.edited,m.hidden,m.created_at,m.parent_id,
                u.id as user_id,u.username,u.avatar_url
         FROM messages m JOIN users u ON m.user_id=u.id
-        WHERE m.location_id=%s AND m.parent_id IS NULL AND m.hidden=0
+        WHERE m.location_id=? AND m.parent_id IS NULL AND m.hidden=0
         ORDER BY m.score DESC, m.created_at DESC LIMIT 100
     """, (lid,)).fetchall()
     result = []
@@ -754,7 +815,7 @@ def get_messages(lid):
             SELECT m.id,m.content,m.score,m.edited,m.hidden,m.created_at,m.parent_id,
                    u.id as user_id,u.username,u.avatar_url
             FROM messages m JOIN users u ON m.user_id=u.id
-            WHERE m.parent_id=%s AND m.hidden=0 ORDER BY m.created_at ASC LIMIT 50
+            WHERE m.parent_id=? AND m.hidden=0 ORDER BY m.created_at ASC LIMIT 50
         """, (msg['id'],)).fetchall()
         result.append(fmt_msg(msg, uid, [fmt_msg(r, uid) for r in replies]))
     return jsonify(result)
@@ -765,7 +826,7 @@ def user_messages(uid):
         SELECT m.id,m.content,m.score,m.edited,m.created_at,
                l.place_name,l.id as location_id,l.latitude,l.longitude
         FROM messages m JOIN locations l ON m.location_id=l.id
-        WHERE m.user_id=%s AND m.parent_id IS NULL AND m.hidden=0
+        WHERE m.user_id=? AND m.parent_id IS NULL AND m.hidden=0
         ORDER BY m.created_at DESC LIMIT 50
     """, (uid,)).fetchall()
     return jsonify([dict(r) for r in rows])
@@ -784,34 +845,30 @@ def post_message():
     if len(content) > 500: return jsonify({'error': 'Max 500 chars'}), 400
     content = html.escape(content)
     db      = get_db()
-    if not db.execute("SELECT id FROM locations WHERE id=%s", (lid,)).fetchone():
+    if not db.execute("SELECT id FROM locations WHERE id=?", (lid,)).fetchone():
         return jsonify({'error': 'Location not found'}), 404
     parent = None
     if parent_id:
-        parent = db.execute("SELECT id,user_id,location_id FROM messages WHERE id=%s",
+        parent = db.execute("SELECT id,user_id,location_id FROM messages WHERE id=?",
                              (parent_id,)).fetchone()
         if not parent or parent['location_id'] != lid:
             return jsonify({'error': 'Invalid parent'}), 400
-# Insert message and get the new id
-    cur = db.execute(
-        "INSERT INTO messages (location_id,user_id,content,parent_id) VALUES (%s,%s,%s,%s) RETURNING id",
-        (lid, u['id'], content, parent_id)
-    )
-    mid = cur.fetchone()['id']
-    db.commit()
-    db.execute("UPDATE locations SET message_count=message_count+1,last_user_id=%s,last_user_avatar=%s WHERE id=%s",
+    cur = db.execute("INSERT INTO messages (location_id,user_id,content,parent_id) VALUES (?,?,?,?)",
+                     (lid, u['id'], content, parent_id))
+    mid = cur.lastrowid
+    db.execute("UPDATE locations SET message_count=message_count+1,last_user_id=?,last_user_avatar=? WHERE id=?",
                (u['id'], u['avatar_url'], lid))
     if not parent_id:
-        db.execute("UPDATE locations SET top_content=%s WHERE id=%s", (content[:80], lid))
-    db.execute("UPDATE users SET post_count=post_count+1 WHERE id=%s", (u['id'],))
+        db.execute("UPDATE locations SET top_content=? WHERE id=?", (content[:80], lid))
+    db.execute("UPDATE users SET post_count=post_count+1 WHERE id=?", (u['id'],))
     if parent and parent['user_id'] != u['id']:
-        db.execute("INSERT INTO notifications (user_id,message_id,reply_id) VALUES (%s,%s,%s)",
+        db.execute("INSERT INTO notifications (user_id,message_id,reply_id) VALUES (?,?,?)",
                    (parent['user_id'], parent_id, mid))
     db.commit()
     new_badges = award_badges(u['id'])
     row = db.execute("""SELECT m.id,m.content,m.score,m.edited,m.hidden,m.created_at,m.parent_id,
                                u.id as user_id,u.username,u.avatar_url
-                        FROM messages m JOIN users u ON m.user_id=u.id WHERE m.id=%s""",
+                        FROM messages m JOIN users u ON m.user_id=u.id WHERE m.id=?""",
                      (mid,)).fetchone()
     msg_data = fmt_msg(row, u['id'])
     broker.publish(lid, 'new_message', msg_data)
@@ -829,10 +886,10 @@ def edit_message(mid):
     content = data.get('content', '').strip()
     if not content or len(content) > 500: return jsonify({'error': 'Invalid content'}), 400
     db  = get_db()
-    msg = db.execute("SELECT user_id,location_id FROM messages WHERE id=%s", (mid,)).fetchone()
+    msg = db.execute("SELECT user_id,location_id FROM messages WHERE id=?", (mid,)).fetchone()
     if not msg: return jsonify({'error': 'Not found'}), 404
     if msg['user_id'] != u['id']: return jsonify({'error': 'Forbidden'}), 403
-    db.execute("UPDATE messages SET content=%s,edited=1 WHERE id=%s", (html.escape(content), mid))
+    db.execute("UPDATE messages SET content=?,edited=1 WHERE id=?", (html.escape(content), mid))
     db.commit()
     broker.publish(msg['location_id'], 'edit_message', {'id': mid, 'content': html.escape(content)})
     return jsonify({'ok': True})
@@ -842,43 +899,43 @@ def delete_message(mid):
     u = current_user()
     if not u: return jsonify({'error': 'Unauthorized'}), 401
     db  = get_db()
-    msg = db.execute("SELECT user_id,location_id,parent_id FROM messages WHERE id=%s", (mid,)).fetchone()
+    msg = db.execute("SELECT user_id,location_id,parent_id FROM messages WHERE id=?", (mid,)).fetchone()
     if not msg: return jsonify({'error': 'Not found'}), 404
     if msg['user_id'] != u['id']: return jsonify({'error': 'Forbidden'}), 403
     lid = msg['location_id']
 
     # Also delete all child replies and their related data
     child_ids = [r['id'] for r in db.execute(
-        "SELECT id FROM messages WHERE parent_id=%s", (mid,)).fetchall()]
+        "SELECT id FROM messages WHERE parent_id=?", (mid,)).fetchall()]
     for cid in child_ids:
-        db.execute("DELETE FROM votes WHERE message_id=%s", (cid,))
-        db.execute("DELETE FROM reactions WHERE message_id=%s", (cid,))
-        db.execute("DELETE FROM notifications WHERE message_id=%s OR reply_id=%s", (cid, cid))
-        db.execute("DELETE FROM messages WHERE id=%s", (cid,))
+        db.execute("DELETE FROM votes WHERE message_id=?", (cid,))
+        db.execute("DELETE FROM reactions WHERE message_id=?", (cid,))
+        db.execute("DELETE FROM notifications WHERE message_id=? OR reply_id=?", (cid, cid))
+        db.execute("DELETE FROM messages WHERE id=?", (cid,))
 
-    db.execute("DELETE FROM votes WHERE message_id=%s", (mid,))
-    db.execute("DELETE FROM reactions WHERE message_id=%s", (mid,))
-    db.execute("DELETE FROM notifications WHERE message_id=%s OR reply_id=%s", (mid, mid))
-    db.execute("DELETE FROM messages WHERE id=%s", (mid,))
+    db.execute("DELETE FROM votes WHERE message_id=?", (mid,))
+    db.execute("DELETE FROM reactions WHERE message_id=?", (mid,))
+    db.execute("DELETE FROM notifications WHERE message_id=? OR reply_id=?", (mid, mid))
+    db.execute("DELETE FROM messages WHERE id=?", (mid,))
 
     location_deleted = False
     if not msg['parent_id']:
-        db.execute("UPDATE locations SET message_count=MAX(0,message_count-1) WHERE id=%s", (lid,))
+        db.execute("UPDATE locations SET message_count=MAX(0,message_count-1) WHERE id=?", (lid,))
         remaining = db.execute(
-            "SELECT COUNT(*) FROM messages WHERE location_id=%s AND parent_id IS NULL AND hidden=0",
+            "SELECT COUNT(*) FROM messages WHERE location_id=? AND parent_id IS NULL AND hidden=0",
             (lid,)).fetchone()[0]
         if remaining == 0:
             # Wipe the location entirely
-            db.execute("DELETE FROM online_presence WHERE location_id=%s", (lid,))
-            db.execute("DELETE FROM locations WHERE id=%s", (lid,))
+            db.execute("DELETE FROM online_presence WHERE location_id=?", (lid,))
+            db.execute("DELETE FROM locations WHERE id=?", (lid,))
             location_deleted = True
 
     # Refresh top_content after deletion
     if not msg['parent_id'] and not location_deleted:
         best = db.execute(
-            "SELECT content FROM messages WHERE location_id=%s AND parent_id IS NULL AND hidden=0 ORDER BY score DESC, created_at DESC LIMIT 1",
+            "SELECT content FROM messages WHERE location_id=? AND parent_id IS NULL AND hidden=0 ORDER BY score DESC, created_at DESC LIMIT 1",
             (lid,)).fetchone()
-        db.execute("UPDATE locations SET top_content=%s WHERE id=%s",
+        db.execute("UPDATE locations SET top_content=? WHERE id=?",
                    (best['content'][:80] if best else None, lid))
     db.commit()
     broker.publish(lid, 'delete_message', {'id': mid})
@@ -896,27 +953,27 @@ def vote():
     mid   = data.get('message_id'); value = data.get('value')
     if mid is None or value not in (1, -1): return jsonify({'error': 'Invalid'}), 400
     db  = get_db()
-    msg = db.execute("SELECT id,location_id FROM messages WHERE id=%s", (mid,)).fetchone()
+    msg = db.execute("SELECT id,location_id FROM messages WHERE id=?", (mid,)).fetchone()
     if not msg: return jsonify({'error': 'Not found'}), 404
-    ex  = db.execute("SELECT value FROM votes WHERE message_id=%s AND user_id=%s",
+    ex  = db.execute("SELECT value FROM votes WHERE message_id=? AND user_id=?",
                      (mid, u['id'])).fetchone()
     if ex:
         if ex['value'] == value:
-            db.execute("DELETE FROM votes WHERE message_id=%s AND user_id=%s", (mid, u['id']))
-            db.execute("UPDATE messages SET score=score-%s WHERE id=%s", (value, mid))
+            db.execute("DELETE FROM votes WHERE message_id=? AND user_id=?", (mid, u['id']))
+            db.execute("UPDATE messages SET score=score-? WHERE id=?", (value, mid))
             new_vote = 0
         else:
-            db.execute("UPDATE votes SET value=%s WHERE message_id=%s AND user_id=%s",
+            db.execute("UPDATE votes SET value=? WHERE message_id=? AND user_id=?",
                        (value, mid, u['id']))
-            db.execute("UPDATE messages SET score=score+%s WHERE id=%s", (value*2, mid))
+            db.execute("UPDATE messages SET score=score+? WHERE id=?", (value*2, mid))
             new_vote = value
     else:
-        db.execute("INSERT INTO votes (message_id,user_id,value) VALUES (%s,%s,%s)",
+        db.execute("INSERT INTO votes (message_id,user_id,value) VALUES (?,?,?)",
                    (mid, u['id'], value))
-        db.execute("UPDATE messages SET score=score+%s WHERE id=%s", (value, mid))
+        db.execute("UPDATE messages SET score=score+? WHERE id=?", (value, mid))
         new_vote = value
     db.commit()
-    score = db.execute("SELECT score FROM messages WHERE id=%s", (mid,)).fetchone()['score']
+    score = db.execute("SELECT score FROM messages WHERE id=?", (mid,)).fetchone()['score']
     broker.publish(msg['location_id'], 'vote_update', {'id': mid, 'score': score})
     return jsonify({'score': score, 'user_vote': new_vote})
 
@@ -936,15 +993,15 @@ def react():
     mid   = data.get('message_id'); emoji = data.get('emoji')
     if not mid or emoji not in ALLOWED_EMOJIS: return jsonify({'error': 'Invalid emoji'}), 400
     db  = get_db()
-    msg = db.execute("SELECT id,location_id FROM messages WHERE id=%s", (mid,)).fetchone()
+    msg = db.execute("SELECT id,location_id FROM messages WHERE id=?", (mid,)).fetchone()
     if not msg: return jsonify({'error': 'Not found'}), 404
-    ex  = db.execute("SELECT id FROM reactions WHERE message_id=%s AND user_id=%s AND emoji=%s",
+    ex  = db.execute("SELECT id FROM reactions WHERE message_id=? AND user_id=? AND emoji=?",
                      (mid, u['id'], emoji)).fetchone()
     if ex:
-        db.execute("DELETE FROM reactions WHERE message_id=%s AND user_id=%s AND emoji=%s",
+        db.execute("DELETE FROM reactions WHERE message_id=? AND user_id=? AND emoji=?",
                    (mid, u['id'], emoji))
     else:
-        db.execute("INSERT INTO reactions (message_id,user_id,emoji) VALUES (%s,%s,%s)",
+        db.execute("INSERT INTO reactions (message_id,user_id,emoji) VALUES (?,?,?)",
                    (mid, u['id'], emoji))
     db.commit()
     reactions = get_reactions(mid, u['id'])
@@ -962,12 +1019,12 @@ def report():
     reason = html.escape(data.get('reason', '').strip()[:200])
     if not mid or not reason: return jsonify({'error': 'message_id and reason required'}), 400
     db = get_db()
-    if not db.execute("SELECT id FROM messages WHERE id=%s", (mid,)).fetchone():
+    if not db.execute("SELECT id FROM messages WHERE id=?", (mid,)).fetchone():
         return jsonify({'error': 'Not found'}), 404
-    if db.execute("SELECT id FROM reports WHERE message_id=%s AND reporter_id=%s AND status='pending'",
+    if db.execute("SELECT id FROM reports WHERE message_id=? AND reporter_id=? AND status='pending'",
                   (mid, u['id'])).fetchone():
         return jsonify({'error': 'Already reported'}), 400
-    db.execute("INSERT INTO reports (message_id,reporter_id,reason) VALUES (%s,%s,%s)",
+    db.execute("INSERT INTO reports (message_id,reporter_id,reason) VALUES (?,?,?)",
                (mid, u['id'], reason))
     db.commit()
     return jsonify({'ok': True})
@@ -979,11 +1036,11 @@ def resolve_report(rid):
     data   = request.get_json(silent=True) or {}
     action = data.get('action')
     db     = get_db()
-    r      = db.execute("SELECT message_id FROM reports WHERE id=%s", (rid,)).fetchone()
+    r      = db.execute("SELECT message_id FROM reports WHERE id=?", (rid,)).fetchone()
     if not r: return jsonify({'error': 'Not found'}), 404
     if action == 'hide':
-        db.execute("UPDATE messages SET hidden=TRUE WHERE id=%s", (r['message_id'],))
-    db.execute("UPDATE reports SET status='resolved',resolved_by=%s WHERE id=%s", (u['id'], rid))
+        db.execute("UPDATE messages SET hidden=1 WHERE id=?", (r['message_id'],))
+    db.execute("UPDATE reports SET status='resolved',resolved_by=? WHERE id=?", (u['id'], rid))
     db.commit()
     return jsonify({'ok': True})
 
@@ -1001,7 +1058,7 @@ def get_notifications():
         JOIN users ru   ON r.user_id=ru.id
         JOIN messages m ON n.message_id=m.id
         JOIN locations l ON m.location_id=l.id
-        WHERE n.user_id=%s ORDER BY n.created_at DESC LIMIT 30
+        WHERE n.user_id=? ORDER BY n.created_at DESC LIMIT 30
     """, (u['id'],)).fetchall()
     return jsonify([dict(r) for r in rows])
 
@@ -1009,7 +1066,7 @@ def get_notifications():
 def mark_read():
     u = current_user()
     if not u: return jsonify({'error': 'Unauthorized'}), 401
-    get_db().execute("UPDATE notifications SET read=TRUE WHERE user_id=%s", (u['id'],))
+    get_db().execute("UPDATE notifications SET read=1 WHERE user_id=?", (u['id'],))
     get_db().commit()
     return jsonify({'ok': True})
 
@@ -1017,7 +1074,7 @@ def mark_read():
 def unread_count():
     u = current_user()
     if not u: return jsonify({'count': 0})
-    c = get_db().execute("SELECT COUNT(*) FROM notifications WHERE user_id=%s AND read=0",
+    c = get_db().execute("SELECT COUNT(*) FROM notifications WHERE user_id=? AND read=0",
                           (u['id'],)).fetchone()[0]
     return jsonify({'count': c})
 
@@ -1029,7 +1086,7 @@ def translate():
     target = data.get('target', 'en')
     if not text: return jsonify({'error': 'No text'}), 400
     try:
-        res = http.post(f"{LIBRETRANSLATE_URL}/translate",
+        res = _http.post(f"{LIBRETRANSLATE_URL}/translate",
                         json={'q': text, 'source': 'auto', 'target': target, 'format': 'text'},
                         timeout=5)
         if res.ok:
